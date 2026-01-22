@@ -1,0 +1,242 @@
+{% extends "base.html" %}
+
+{% block title %}Tag Management - FileCat{% endblock %}
+
+{% block content %}
+<h1>Tag Management</h1>
+
+<div class="card">
+    <h2 class="card-title">All Tags</h2>
+    
+    <div style="margin-bottom: 1rem;">
+        <input type="text" id="searchTagInput" class="form-input" placeholder="Search tags..." onkeyup="filterTags()">
+    </div>
+    
+    <div id="tagsTable" style="overflow-x: auto;">
+        <table style="width: 100%; border-collapse: collapse;">
+            <thead>
+                <tr style="background: var(--bg-color); border-bottom: 2px solid var(--border-color);">
+                    <th style="padding: 0.75rem; text-align: left;">Tag Name</th>
+                    <th style="padding: 0.75rem; text-align: center;">Usage Count</th>
+                    <th style="padding: 0.75rem; text-align: center;">Actions</th>
+                </tr>
+            </thead>
+            <tbody id="tagsTableBody">
+                <tr>
+                    <td colspan="3" style="padding: 2rem; text-align: center; color: var(--text-secondary);">
+                        Loading tags...
+                    </td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<!-- Rename Modal -->
+<div id="renameModal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 1000; align-items: center; justify-content: center;">
+    <div style="background: white; padding: 2rem; border-radius: 8px; max-width: 400px; width: 90%;">
+        <h3 style="margin-bottom: 1rem;">Rename Tag</h3>
+        <div class="form-group">
+            <label class="form-label">Current Name: <span id="currentTagName" style="font-weight: bold;"></span></label>
+        </div>
+        <div class="form-group">
+            <label class="form-label">New Name:</label>
+            <input type="text" id="newTagName" class="form-input">
+        </div>
+        <div style="display: flex; gap: 1rem; justify-content: flex-end;">
+            <button class="btn btn-secondary" onclick="closeRenameModal()">Cancel</button>
+            <button class="btn btn-primary" onclick="confirmRename()">Rename</button>
+        </div>
+    </div>
+</div>
+
+<!-- Merge Modal -->
+<div id="mergeModal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 1000; align-items: center; justify-content: center;">
+    <div style="background: white; padding: 2rem; border-radius: 8px; max-width: 400px; width: 90%;">
+        <h3 style="margin-bottom: 1rem;">Merge Tag</h3>
+        <div class="form-group">
+            <label class="form-label">Merge <span id="sourceTagName" style="font-weight: bold;"></span> into:</label>
+            <select id="targetTagSelect" class="form-select">
+                <option value="">Select target tag...</option>
+            </select>
+        </div>
+        <p style="color: var(--text-secondary); font-size: 0.875rem; margin-bottom: 1rem;">
+            All images with the source tag will be tagged with the target tag, and the source tag will be deleted.
+        </p>
+        <div style="display: flex; gap: 1rem; justify-content: flex-end;">
+            <button class="btn btn-secondary" onclick="closeMergeModal()">Cancel</button>
+            <button class="btn btn-danger" onclick="confirmMerge()">Merge & Delete</button>
+        </div>
+    </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+let allTags = [];
+let currentTagId = null;
+
+async function loadTags() {
+    try {
+        const response = await fetch('/api/tags');
+        const data = await response.json();
+        allTags = data.tags;
+        displayTags(allTags);
+    } catch (error) {
+        console.error('Error loading tags:', error);
+    }
+}
+
+function displayTags(tags) {
+    const tbody = document.getElementById('tagsTableBody');
+    
+    if (tags.length === 0) {
+        tbody.innerHTML = `
+            <tr>
+                <td colspan="3" style="padding: 2rem; text-align: center; color: var(--text-secondary);">
+                    No tags found
+                </td>
+            </tr>
+        `;
+        return;
+    }
+    
+    tbody.innerHTML = tags.map(tag => `
+        <tr style="border-bottom: 1px solid var(--border-color);">
+            <td style="padding: 0.75rem;">
+                <span class="tag">${tag.tag_name}</span>
+            </td>
+            <td style="padding: 0.75rem; text-align: center;">
+                ${tag.usage_count}
+            </td>
+            <td style="padding: 0.75rem; text-align: center;">
+                <button class="btn btn-secondary" style="padding: 0.25rem 0.75rem; font-size: 0.875rem;" 
+                        onclick="openRenameModal(${tag.id}, '${tag.tag_name}')">Rename</button>
+                <button class="btn btn-secondary" style="padding: 0.25rem 0.75rem; font-size: 0.875rem;" 
+                        onclick="openMergeModal(${tag.id}, '${tag.tag_name}')">Merge</button>
+                <button class="btn btn-danger" style="padding: 0.25rem 0.75rem; font-size: 0.875rem;" 
+                        onclick="deleteTag(${tag.id}, '${tag.tag_name}')">Delete</button>
+            </td>
+        </tr>
+    `).join('');
+}
+
+function filterTags() {
+    const query = document.getElementById('searchTagInput').value.toLowerCase();
+    const filtered = allTags.filter(tag => tag.tag_name.toLowerCase().includes(query));
+    displayTags(filtered);
+}
+
+function openRenameModal(tagId, tagName) {
+    currentTagId = tagId;
+    document.getElementById('currentTagName').textContent = tagName;
+    document.getElementById('newTagName').value = tagName;
+    document.getElementById('renameModal').style.display = 'flex';
+}
+
+function closeRenameModal() {
+    document.getElementById('renameModal').style.display = 'none';
+    currentTagId = null;
+}
+
+async function confirmRename() {
+    const newName = document.getElementById('newTagName').value.trim();
+    if (!newName) {
+        alert('Please enter a new tag name');
+        return;
+    }
+    
+    try {
+        const response = await fetch(`/api/tags/${currentTagId}/rename`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ new_name: newName })
+        });
+        
+        const data = await response.json();
+        
+        if (data.success) {
+            closeRenameModal();
+            loadTags();
+        } else {
+            alert('Failed to rename tag. Tag name may already exist.');
+        }
+    } catch (error) {
+        alert('Error renaming tag: ' + error.message);
+    }
+}
+
+function openMergeModal(tagId, tagName) {
+    currentTagId = tagId;
+    document.getElementById('sourceTagName').textContent = tagName;
+    
+    // Populate target tag dropdown (exclude current tag)
+    const select = document.getElementById('targetTagSelect');
+    select.innerHTML = '<option value="">Select target tag...</option>' +
+        allTags.filter(t => t.id !== tagId)
+               .map(t => `<option value="${t.id}">${t.tag_name} (${t.usage_count})</option>`)
+               .join('');
+    
+    document.getElementById('mergeModal').style.display = 'flex';
+}
+
+function closeMergeModal() {
+    document.getElementById('mergeModal').style.display = 'none';
+    currentTagId = null;
+}
+
+async function confirmMerge() {
+    const targetId = document.getElementById('targetTagSelect').value;
+    if (!targetId) {
+        alert('Please select a target tag');
+        return;
+    }
+    
+    if (!confirm('Are you sure you want to merge these tags? This cannot be undone.')) {
+        return;
+    }
+    
+    try {
+        const response = await fetch('/api/tags/merge', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ source_id: currentTagId, target_id: parseInt(targetId) })
+        });
+        
+        const data = await response.json();
+        
+        if (data.success) {
+            closeMergeModal();
+            loadTags();
+        } else {
+            alert('Failed to merge tags');
+        }
+    } catch (error) {
+        alert('Error merging tags: ' + error.message);
+    }
+}
+
+async function deleteTag(tagId, tagName) {
+    if (!confirm(`Are you sure you want to delete the tag "${tagName}"? This will remove it from all images.`)) {
+        return;
+    }
+    
+    try {
+        const response = await fetch(`/api/tags/${tagId}`, { method: 'DELETE' });
+        const data = await response.json();
+        
+        if (data.success) {
+            loadTags();
+        } else {
+            alert('Failed to delete tag');
+        }
+    } catch (error) {
+        alert('Error deleting tag: ' + error.message);
+    }
+}
+
+// Load tags on page load
+loadTags();
+</script>
+{% endblock %}

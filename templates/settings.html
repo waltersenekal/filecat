@@ -1,0 +1,586 @@
+{% extends "base.html" %}
+
+{% block title %}Settings - FileCat{% endblock %}
+
+{% block content %}
+<h1>Settings</h1>
+
+<div class="card">
+    <h2 class="card-title">Configuration</h2>
+    
+    <div class="form-group">
+        <label class="form-label">Source Folder:</label>
+        <input type="text" class="form-input" value="{{ config.source_folder }}" readonly>
+        <small style="color: var(--text-secondary);">
+            This is where FileCat scans for images. Only image files are processed.
+        </small>
+    </div>
+    
+    <div class="form-group">
+        <label class="form-label">Thumbnail Folder:</label>
+        <input type="text" class="form-input" value="{{ config.thumbnail_folder }}" readonly>
+    </div>
+    
+    <div class="form-group">
+        <label class="form-label">Supported Image Formats:</label>
+        <div style="color: var(--text-secondary);">
+            {{ config.supported_extensions | join(', ') }}
+        </div>
+        <small style="color: var(--text-secondary);">
+            All other file types in the source folder are ignored.
+        </small>
+    </div>
+    
+    <div class="form-group">
+        <label class="form-label">Default Items Per Page:</label>
+        <input type="number" class="form-input" value="{{ config.default_items_per_page }}" readonly>
+    </div>
+</div>
+
+<div class="card">
+    <h2 class="card-title">Database Management</h2>
+    
+    <div style="display: flex; gap: 1rem; flex-wrap: wrap;">
+        <button class="btn btn-primary" onclick="backupDatabase()">Backup Database</button>
+        <button class="btn btn-secondary" onclick="checkMissingFiles()">Check for Missing Files</button>
+        <button class="btn btn-secondary" onclick="regenerateThumbnails()">Regenerate All Thumbnails</button>
+        <button class="btn btn-secondary" onclick="fixTaggedStatus()">Fix Tag Status</button>
+    </div>
+    
+    <div id="settingsResults" style="margin-top: 1rem;"></div>
+</div>
+
+<div class="card">
+    <h2 class="card-title">🤖 AI Auto-Tagging - Phase 2</h2>
+
+    <p style="color: var(--text-secondary); margin-bottom: 1rem;">
+        Use STAG/RAM AI to automatically analyze images and add tags.
+        Tags are <strong>automatically added</strong> to each image during batch analysis.
+        The RAM model will be downloaded on first use (~5GB).
+    </p>
+
+    <!-- Background Auto-Tagging Status -->
+    <div style="background: var(--card-bg); border: 1px solid var(--border-color); border-radius: 8px; padding: 1rem; margin-bottom: 1rem;">
+        <h3 style="margin-top: 0; font-size: 1rem; display: flex; align-items: center; gap: 0.5rem;">
+            <span id="autoTagStatusIcon">⏸️</span> Background Auto-Tagging
+        </h3>
+
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem; margin: 1rem 0; font-size: 0.875rem;">
+            <div><strong>Status:</strong> <span id="autoTagStatus">Loading...</span></div>
+            <div><strong>Images Processed:</strong> <span id="autoTagProcessed">0</span></div>
+            <div><strong>Tags Added:</strong> <span id="autoTagTagsAdded">0</span></div>
+            <div><strong>Last Run:</strong> <span id="autoTagLastRun">Never</span></div>
+            <div><strong>Next Run:</strong> <span id="autoTagNextRun">-</span></div>
+            <div><strong>Errors:</strong> <span id="autoTagErrors">0</span></div>
+        </div>
+
+        <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
+            <button class="btn btn-secondary" onclick="toggleAutoTag()" id="autoTagToggleBtn" style="font-size: 0.875rem;">
+                ▶️ Start Service
+            </button>
+            <button class="btn btn-primary" onclick="triggerAutoTag()" id="autoTagTriggerBtn" style="font-size: 0.875rem;">
+                ⚡ Run Now
+            </button>
+        </div>
+
+        <p style="color: var(--text-secondary); font-size: 0.75rem; margin-top: 0.5rem; margin-bottom: 0;">
+            Background service automatically scans for new files and tags them every 5 minutes.
+        </p>
+    </div>
+
+    <!-- Manual Batch Analysis -->
+    <div style="border-top: 1px solid var(--border-color); padding-top: 1rem;">
+        <h3 style="font-size: 1rem; margin-bottom: 0.5rem;">Manual Batch Analysis</h3>
+        <div style="display: flex; gap: 1rem; flex-wrap: wrap; margin-bottom: 1rem;">
+            <button class="btn btn-primary" onclick="batchAnalyzeAI()" id="batchAIBtn">
+                🧠 Analyze All Images Now
+            </button>
+            <span id="aiInfo" style="color: var(--text-secondary); align-self: center;"></span>
+        </div>
+    </div>
+
+    <div id="aiProgress" style="display: none; margin-top: 1rem;">
+        <p id="aiProgressText">Analyzing images...</p>
+        <div style="background: var(--card-bg); border-radius: 8px; padding: 0.5rem; margin: 1rem 0; border: 1px solid var(--border-color);">
+            <div id="aiProgressBar" style="background: var(--primary-color); height: 24px; border-radius: 4px; width: 0%; transition: width 0.3s;"></div>
+        </div>
+        <p style="text-align: center; color: var(--text-secondary);">
+            <span id="aiProgressCount">0 / 0</span><br>
+            <span id="aiCurrentFile" style="font-size: 0.875rem;"></span>
+        </p>
+    </div>
+
+    <p style="color: var(--text-secondary); font-size: 0.875rem; margin-top: 1rem;">
+        <strong>How it works:</strong> The AI analyzes each image and automatically adds 10-20 relevant tags.
+        Already tagged images are skipped. Tags are added immediately - no review needed!
+        First-time use will download the AI model (may take a few minutes).
+    </p>
+</div>
+
+<div class="card">
+    <h2 class="card-title">Export/Import Settings</h2>
+    
+    <div style="display: flex; gap: 1rem; flex-wrap: wrap; margin-bottom: 1rem;">
+        <button class="btn btn-primary" onclick="exportSettings()">Export Settings</button>
+    </div>
+    
+    <p style="color: var(--text-secondary); font-size: 0.875rem;">
+        Export your current configuration to a JSON file for backup or sharing.
+        Note: Importing settings requires manual editing of config.py and restarting the application.
+    </p>
+</div>
+
+<div class="card">
+    <h2 class="card-title">About FileCat</h2>
+    <p>Version 2.0 - Phase 2 (with AI Auto-Tagging)</p>
+    <p style="color: var(--text-secondary); margin-top: 0.5rem;">
+        FileCat is an image cataloging system for organizing and searching your photo collection.
+        Only image files are scanned and cataloged - all other content is ignored.
+    </p>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+async function backupDatabase() {
+    const resultsDiv = document.getElementById('settingsResults');
+    resultsDiv.innerHTML = '<div class="loading">Creating database backup...</div>';
+    
+    try {
+        const response = await fetch('/api/database/backup', { method: 'POST' });
+        const data = await response.json();
+        
+        if (data.success) {
+            resultsDiv.innerHTML = `
+                <div style="padding: 1rem; background: #f0fdf4; border-radius: 6px; color: #10b981;">
+                    ✓ Database backed up successfully!<br>
+                    <small>Backup saved to: ${data.backup_file}</small>
+                </div>
+            `;
+        } else {
+            resultsDiv.innerHTML = `
+                <div style="padding: 1rem; background: #fef2f2; border-radius: 6px; color: #dc2626;">
+                    Error: ${data.error}
+                </div>
+            `;
+        }
+    } catch (error) {
+        resultsDiv.innerHTML = `
+            <div style="padding: 1rem; background: #fef2f2; border-radius: 6px; color: #dc2626;">
+                Error: ${error.message}
+            </div>
+        `;
+    }
+}
+
+async function checkMissingFiles() {
+    const resultsDiv = document.getElementById('settingsResults');
+    resultsDiv.innerHTML = '<div class="loading">Checking for missing files...</div>';
+    
+    try {
+        const response = await fetch('/api/scan/missing');
+        const data = await response.json();
+        
+        if (data.missing_files.length === 0) {
+            resultsDiv.innerHTML = `
+                <div style="padding: 1rem; background: #f0fdf4; border-radius: 6px; color: #10b981;">
+                    ✓ All files are present!
+                </div>
+            `;
+        } else {
+            const fileList = data.missing_files.slice(0, 10).map(f => 
+                `<li style="margin: 0.25rem 0;">
+                    <span style="font-family: monospace; font-size: 0.875rem;">${f.filepath}</span>
+                    <button onclick="removeMissingFile(${f.id})" class="btn btn-secondary" style="margin-left: 1rem; padding: 0.25rem 0.5rem; font-size: 0.75rem;">Remove from DB</button>
+                </li>`
+            ).join('');
+            
+            resultsDiv.innerHTML = `
+                <div style="padding: 1rem; background: #fef2f2; border-radius: 6px; color: #dc2626;">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
+                        <strong>Missing files: ${data.missing_files.length}</strong>
+                        <button onclick="removeAllMissingFiles()" class="btn btn-secondary" style="padding: 0.5rem 1rem;">Remove All Missing</button>
+                    </div>
+                    <ul style="margin-top: 0.5rem; list-style: none; padding-left: 0;">
+                        ${fileList}
+                        ${data.missing_files.length > 10 ? '<li style="margin-top: 0.5rem; color: var(--text-secondary);">... and ' + (data.missing_files.length - 10) + ' more</li>' : ''}
+                    </ul>
+                </div>
+            `;
+        }
+    } catch (error) {
+        resultsDiv.innerHTML = `
+            <div style="padding: 1rem; background: #fef2f2; border-radius: 6px; color: #dc2626;">
+                Error: ${error.message}
+            </div>
+        `;
+    }
+}
+
+function regenerateThumbnails() {
+    const resultsDiv = document.getElementById('settingsResults');
+    resultsDiv.innerHTML = `
+        <div class="loading">Regenerating all thumbnails...</div>
+        <div id="thumbProgressBar" style="margin-top:1rem; width:100%; background:#eee; border-radius:6px; height:24px;">
+            <div id="thumbProgressFill" style="height:100%; width:0%; background:#2563eb; border-radius:6px;"></div>
+        </div>
+        <div id="thumbProgressText" style="margin-top:0.5rem; color:#2563eb; font-weight:bold;"></div>
+    `;
+    fetch('/api/thumbnails/regenerate', { method: 'POST' })
+        .then(r => r.json())
+        .then(data => {
+            // Start listening for progress
+            const evtSource = new EventSource('/api/thumbnails/progress');
+            evtSource.onmessage = function(event) {
+                const d = JSON.parse(event.data);
+                const percent = d.total ? Math.round(100 * d.current / d.total) : 0;
+                document.getElementById('thumbProgressFill').style.width = percent + '%';
+                document.getElementById('thumbProgressText').textContent = `Progress: ${d.current} / ${d.total}`;
+                if (d.done) {
+                    evtSource.close();
+                    resultsDiv.innerHTML = `<div style='padding:1rem; background:#f0fdf4; border-radius:6px; color:#10b981;'>
+                        ✓ Thumbnails regenerated.<br>
+                        Success: ${d.success} / ${d.total}<br>
+                        Failed: ${d.failed}
+                    </div>`;
+                }
+            };
+        })
+        .catch(error => {
+            resultsDiv.innerHTML = `<div style="padding: 1rem; background: #fef2f2; border-radius: 6px; color: #dc2626;">
+                Error: ${error.message}
+            </div>`;
+        });
+}
+
+function exportSettings() {
+    window.location.href = '/api/settings/export';
+}
+
+async function removeMissingFile(imageId) {
+    if (!confirm('Remove this image from the database?')) return;
+    
+    try {
+        const response = await fetch(`/api/images/${imageId}`, { method: 'DELETE' });
+        const data = await response.json();
+        
+        if (data.success) {
+            // Refresh the missing files check
+            checkMissingFiles();
+        } else {
+            alert('Error: ' + data.error);
+        }
+    } catch (error) {
+        alert('Error: ' + error.message);
+    }
+}
+
+async function removeAllMissingFiles() {
+    if (!confirm('Remove ALL missing files from the database? This cannot be undone.')) return;
+    
+    const resultsDiv = document.getElementById('settingsResults');
+    resultsDiv.innerHTML = '<div class="loading">Removing missing files...</div>';
+    
+    try {
+        const response = await fetch('/api/images/cleanup-missing', { method: 'POST' });
+        const data = await response.json();
+        
+        if (data.success) {
+            resultsDiv.innerHTML = `
+                <div style="padding: 1rem; background: #f0fdf4; border-radius: 6px; color: #10b981;">
+                    ✓ Removed ${data.removed_count} missing file(s) from database
+                </div>
+            `;
+        } else {
+            resultsDiv.innerHTML = `
+                <div style="padding: 1rem; background: #fef2f2; border-radius: 6px; color: #dc2626;">
+                    Error: ${data.error}
+                </div>
+            `;
+        }
+    } catch (error) {
+        resultsDiv.innerHTML = `
+            <div style="padding: 1rem; background: #fef2f2; border-radius: 6px; color: #dc2626;">
+                Error: ${error.message}
+            </div>
+        `;
+    }
+}
+
+async function fixTaggedStatus() {
+    const resultsDiv = document.getElementById('settingsResults');
+    resultsDiv.innerHTML = '<div class="loading">Checking and fixing tag status...</div>';
+    
+    try {
+        const response = await fetch('/api/database/fix-tagged-status', { method: 'POST' });
+        const data = await response.json();
+        
+        if (data.success) {
+            if (data.fixed_count > 0) {
+                resultsDiv.innerHTML = `
+                    <div style="padding: 1rem; background: #f0fdf4; border-radius: 6px; color: #10b981;">
+                        ✓ Fixed ${data.fixed_count} image(s) with inconsistent tag status
+                        <br><small>These images were marked as tagged but had no tags.</small>
+                    </div>
+                `;
+            } else {
+                resultsDiv.innerHTML = `
+                    <div style="padding: 1rem; background: #f0fdf4; border-radius: 6px; color: #10b981;">
+                        ✓ All images have consistent tag status - no fixes needed!
+                    </div>
+                `;
+            }
+        } else {
+            resultsDiv.innerHTML = `
+                <div style="padding: 1rem; background: #fef2f2; border-radius: 6px; color: #dc2626;">
+                    Error: ${data.error}
+                </div>
+            `;
+        }
+    } catch (error) {
+        resultsDiv.innerHTML = `
+            <div style="padding: 1rem; background: #fef2f2; border-radius: 6px; color: #dc2626;">
+                Error: ${error.message}
+            </div>
+        `;
+    }
+}
+
+// AI Auto-Tagging Functions - Phase 2
+async function batchAnalyzeAI() {
+    const btn = document.getElementById('batchAIBtn');
+    const progressDiv = document.getElementById('aiProgress');
+    const infoSpan = document.getElementById('aiInfo');
+
+    btn.disabled = true;
+    btn.textContent = 'Starting AI Analysis...';
+    infoSpan.textContent = '';
+
+    try {
+        // Start batch analysis
+        const response = await fetch('/api/ai/analyze-batch', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ image_ids: [] }) // Empty = analyze all unanalyzed
+        });
+
+        if (!response.ok) throw new Error('Failed to start analysis');
+
+        const data = await response.json();
+
+        if (data.total === 0) {
+            infoSpan.textContent = 'All images have already been analyzed!';
+            infoSpan.style.color = 'var(--success-color)';
+            btn.disabled = false;
+            btn.textContent = '🧠 Analyze All Images with AI';
+            return;
+        }
+
+        progressDiv.style.display = 'block';
+
+        // Listen for progress updates
+        const eventSource = new EventSource('/api/ai/analysis-progress');
+
+        eventSource.onmessage = (event) => {
+            const progress = JSON.parse(event.data);
+            const percent = (progress.current / progress.total) * 100;
+
+            document.getElementById('aiProgressBar').style.width = percent + '%';
+            document.getElementById('aiProgressCount').textContent = `${progress.current} / ${progress.total}`;
+            document.getElementById('aiCurrentFile').textContent = progress.current_file || '';
+
+            // Show tags being added in real-time
+            const tagsInfo = progress.tags_added ? ` - ${progress.tags_added} tags added` : '';
+            document.getElementById('aiProgressText').textContent = `Analyzing & tagging images with AI... (${Math.round(percent)}%)${tagsInfo}`;
+
+            if (progress.done) {
+                eventSource.close();
+
+                if (progress.error) {
+                    document.getElementById('aiProgressText').textContent = 'Error: ' + progress.error;
+                    document.getElementById('aiProgressText').style.color = 'var(--danger-color)';
+                } else {
+                    const tagsMsg = progress.tags_added ? ` Added ${progress.tags_added} tags!` : '';
+                    document.getElementById('aiProgressText').textContent = `✓ Analysis complete! ${progress.total} images analyzed.${tagsMsg}`;
+                    document.getElementById('aiProgressText').style.color = 'var(--success-color)';
+                    infoSpan.textContent = 'AI tags have been automatically added to your images!';
+                    infoSpan.style.color = 'var(--success-color)';
+                }
+
+                btn.disabled = false;
+                btn.textContent = '🧠 Analyze All Images with AI';
+
+                setTimeout(() => {
+                    progressDiv.style.display = 'none';
+                }, 5000);
+            }
+        };
+
+        eventSource.onerror = () => {
+            eventSource.close();
+            document.getElementById('aiProgressText').textContent = 'Error during analysis';
+            document.getElementById('aiProgressText').style.color = 'var(--danger-color)';
+            btn.disabled = false;
+            btn.textContent = '🧠 Analyze All Images with AI';
+        };
+
+    } catch (error) {
+        console.error('Error starting AI analysis:', error);
+        infoSpan.textContent = 'Error: ' + error.message;
+        infoSpan.style.color = 'var(--danger-color)';
+        btn.disabled = false;
+        btn.textContent = '🧠 Analyze All Images with AI';
+    }
+}
+
+// Load AI info on page load
+async function loadAIInfo() {
+    try {
+        const response = await fetch('/api/ai/settings');
+        const data = await response.json();
+
+        if (data.success) {
+            const infoSpan = document.getElementById('aiInfo');
+            if (data.unanalyzed_count > 0) {
+                infoSpan.textContent = `${data.unanalyzed_count} images waiting for analysis`;
+            } else {
+                infoSpan.textContent = 'All images analyzed!';
+                infoSpan.style.color = 'var(--success-color)';
+            }
+        }
+    } catch (error) {
+        console.error('Error loading AI info:', error);
+    }
+}
+
+// Load AI info when page loads
+document.addEventListener('DOMContentLoaded', loadAIInfo);
+
+// Background Auto-Tagging Functions
+let autoTagStatusInterval = null;
+let autoTagServiceRunning = false;
+
+async function loadAutoTagStatus() {
+    try {
+        const response = await fetch('/api/ai/auto-tag/stats');
+        const stats = await response.json();
+
+        autoTagServiceRunning = stats.enabled && !stats.is_running;
+
+        // Update status display
+        const statusEl = document.getElementById('autoTagStatus');
+        const iconEl = document.getElementById('autoTagStatusIcon');
+        const toggleBtn = document.getElementById('autoTagToggleBtn');
+
+        if (stats.enabled) {
+            if (stats.is_running) {
+                statusEl.textContent = '🟢 Running';
+                statusEl.style.color = 'var(--success-color)';
+                iconEl.textContent = '▶️';
+                toggleBtn.textContent = '⏸️ Service Active';
+                toggleBtn.disabled = true;
+            } else {
+                statusEl.textContent = '🟢 Active';
+                statusEl.style.color = 'var(--success-color)';
+                iconEl.textContent = '✓';
+                toggleBtn.textContent = '⏸️ Stop Service';
+            }
+        } else {
+            statusEl.textContent = '⭕ Stopped';
+            statusEl.style.color = 'var(--text-secondary)';
+            iconEl.textContent = '⏸️';
+            toggleBtn.textContent = '▶️ Start Service';
+        }
+
+        // Update stats
+        document.getElementById('autoTagProcessed').textContent = stats.images_processed || 0;
+        document.getElementById('autoTagTagsAdded').textContent = stats.tags_added || 0;
+        document.getElementById('autoTagErrors').textContent = stats.errors || 0;
+
+        // Format timestamps
+        if (stats.last_run) {
+            const lastRun = new Date(stats.last_run);
+            document.getElementById('autoTagLastRun').textContent = lastRun.toLocaleString();
+        } else {
+            document.getElementById('autoTagLastRun').textContent = 'Never';
+        }
+
+        if (stats.next_run) {
+            const nextRun = new Date(stats.next_run);
+            const now = new Date();
+            const minutesUntil = Math.round((nextRun - now) / 60000);
+            document.getElementById('autoTagNextRun').textContent = `${nextRun.toLocaleTimeString()} (in ${minutesUntil} min)`;
+        } else {
+            document.getElementById('autoTagNextRun').textContent = '-';
+        }
+
+    } catch (error) {
+        console.error('Error loading auto-tag status:', error);
+    }
+}
+
+async function toggleAutoTag() {
+    const toggleBtn = document.getElementById('autoTagToggleBtn');
+    const originalText = toggleBtn.textContent;
+    toggleBtn.disabled = true;
+
+    try {
+        const endpoint = autoTagServiceRunning ? '/api/ai/auto-tag/stop' : '/api/ai/auto-tag/start';
+        const response = await fetch(endpoint, { method: 'POST' });
+        const data = await response.json();
+
+        if (data.success) {
+            alert(data.message);
+            await loadAutoTagStatus();
+        } else {
+            alert('Error: ' + (data.error || 'Unknown error'));
+        }
+    } catch (error) {
+        console.error('Error toggling auto-tag:', error);
+        alert('Error: ' + error.message);
+    } finally {
+        toggleBtn.disabled = false;
+    }
+}
+
+async function triggerAutoTag() {
+    const triggerBtn = document.getElementById('autoTagTriggerBtn');
+    const originalText = triggerBtn.textContent;
+    triggerBtn.disabled = true;
+    triggerBtn.textContent = '⏳ Running...';
+
+    try {
+        const response = await fetch('/api/ai/auto-tag/trigger', { method: 'POST' });
+        const data = await response.json();
+
+        if (data.success) {
+            alert(data.message + '\n\nCheck the server console for progress.');
+            // Refresh status after a moment
+            setTimeout(loadAutoTagStatus, 2000);
+        } else {
+            alert('Error: ' + (data.error || 'Unknown error'));
+        }
+    } catch (error) {
+        console.error('Error triggering auto-tag:', error);
+        alert('Error: ' + error.message);
+    } finally {
+        triggerBtn.disabled = false;
+        triggerBtn.textContent = originalText;
+    }
+}
+
+// Load auto-tag status on page load and refresh every 10 seconds
+document.addEventListener('DOMContentLoaded', () => {
+    loadAutoTagStatus();
+    autoTagStatusInterval = setInterval(loadAutoTagStatus, 10000);
+});
+
+// Cleanup interval when page unloads
+window.addEventListener('beforeunload', () => {
+    if (autoTagStatusInterval) {
+        clearInterval(autoTagStatusInterval);
+    }
+});
+
+</script>
+{% endblock %}

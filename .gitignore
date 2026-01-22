@@ -1,0 +1,76 @@
+# FileCat - Git Ignore File
+
+# Exclude user data and generated files
+backups/
+data/
+Digital Papers/
+downloads/
+thumbnails/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+
+# Test files with hardcoded paths
+tag_test.py
+test_*.py
+
+# Placeholder icon (users should add their own)
+icon.png
+
+# Personal file lists
+list.txt
+
+# Virtual environment
+venv/
+.venv/
+env/
+ENV/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Logs
+*.log
+logs/
+
+# Database files (keep schema, exclude actual database)
+*.db
+*.sqlite
+*.sqlite3
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Personal configuration (keep template)
+config_personal.py
+
+# OS files
+Thumbs.db
+desktop.ini
+
+# Jupyter notebooks
+.ipynb_checkpoints/
+
+# pytest
+.pytest_cache/
+.coverage
+htmlcov/
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json

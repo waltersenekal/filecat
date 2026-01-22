@@ -1,0 +1,116 @@
+{% extends "base.html" %}
+
+{% block title %}Dashboard - FileCat{% endblock %}
+
+{% block content %}
+<h1>Dashboard</h1>
+
+<div class="stats-grid">
+    <div class="stat-card">
+        <div class="stat-value">{{ summary.total_images }}</div>
+        <div class="stat-label">Total Images</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-value">{{ summary.tagged_images }}</div>
+        <div class="stat-label">Tagged Images</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-value">{{ summary.untagged_images }}</div>
+        <div class="stat-label">Untagged Images</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-value">{{ summary.total_tags }}</div>
+        <div class="stat-label">Total Tags</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-value">{{ summary.total_size_gb }} GB</div>
+        <div class="stat-label">Storage Used</div>
+    </div>
+</div>
+
+<div class="card">
+    <h2 class="card-title">Quick Actions</h2>
+    <div style="display: flex; gap: 1rem; flex-wrap: wrap;">
+        <button class="btn btn-primary" id="scanBtn" onclick="scanForImages()">Scan for New Images</button>
+        <a href="/maintenance" class="btn btn-success">Start Tagging</a>
+        <a href="/search" class="btn btn-secondary">Browse Images</a>
+    </div>
+    
+    <div id="scanProgress" style="margin-top: 1rem; display: none;">
+        <div class="loading" id="scanLoading">
+            <span class="spinner" style="display:inline-block;width:24px;height:24px;border:3px solid #2563eb;border-top:3px solid #f3f4f6;border-radius:50%;animation:spin 1s linear infinite;vertical-align:middle;"></span>
+            <span style="margin-left:0.75rem;">Scanning for new images...</span>
+        </div>
+        <div id="scanResults"></div>
+    </div>
+</div>
+
+<div class="card">
+    <h2 class="card-title">Recent Activity</h2>
+    <p style="color: var(--text-secondary);">
+        {% if summary.untagged_images > 0 %}
+        You have {{ summary.untagged_images }} untagged images. 
+        <a href="/maintenance">Start tagging them now →</a>
+        {% else %}
+        All images are tagged! 🎉
+        {% endif %}
+    </p>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<style>
+@keyframes spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+}
+</style>
+<script>
+async function scanForImages() {
+    const progressDiv = document.getElementById('scanProgress');
+    const resultsDiv = document.getElementById('scanResults');
+    const scanBtn = document.getElementById('scanBtn');
+    const scanLoading = document.getElementById('scanLoading');
+    
+    progressDiv.style.display = 'block';
+    resultsDiv.innerHTML = '';
+    scanBtn.disabled = true;
+    scanBtn.textContent = 'Scanning...';
+    scanLoading.style.display = 'block';
+    
+    try {
+        const response = await fetch('/api/scan', {
+            method: 'POST'
+        });
+        const data = await response.json();
+        scanLoading.style.display = 'none';
+        resultsDiv.innerHTML = `
+            <div style="margin-top: 1rem; padding: 1rem; background: #f0fdf4; border-radius: 6px;">
+                <h3 style="color: #10b981; margin-bottom: 0.5rem;">Scan Complete!</h3>
+                <ul style="list-style: none; color: #065f46;">
+                    <li>✓ Total image files found: ${data.total_files_found}</li>
+                    <li>✓ New images added: ${data.new_images}</li>
+                    <li>✓ Already in database: ${data.existing_images}</li>
+                    <li>✓ Duration: ${data.duration.toFixed(2)} seconds</li>
+                </ul>
+                ${data.errors && data.errors.length > 0 ? 
+                    `<p style="color: #dc2626; margin-top: 0.5rem;">Errors: ${data.errors.length}</p>` : 
+                    ''}
+            </div>
+        `;
+        // Reload page to update stats
+        setTimeout(() => location.reload(), 2000);
+    } catch (error) {
+        scanLoading.style.display = 'none';
+        resultsDiv.innerHTML = `
+            <div style="margin-top: 1rem; padding: 1rem; background: #fee; border-radius: 6px; color: #dc2626;">
+                Error: ${error.message}
+            </div>
+        `;
+    } finally {
+        scanBtn.disabled = false;
+        scanBtn.textContent = 'Scan for New Images';
+    }
+}
+</script>
+{% endblock %}

@@ -1,0 +1,11 @@
+Flask==3.1.2
+Pillow==12.1.0
+python-dotenv==1.2.1
+reportlab==4.4.9
+
+# STAG/RAM AI Auto-Tagging dependencies
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch
+torchvision
+huggingface-hub==1.3.2
+git+https://github.com/xinyu1205/recognize-anything.git

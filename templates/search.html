@@ -1,0 +1,882 @@
+{% extends "base.html" %}
+
+{% block title %}Search - FileCat{% endblock %}
+
+{% block content %}
+<h1>Search & Browse Images</h1>
+
+<div class="card">
+    <div class="form-group">
+        <label class="form-label">Search by Tags (comma-separated):</label>
+        <input type="text" id="searchTags" class="form-input" placeholder="e.g., baby, outdoor" autocomplete="off">
+        <div id="tagSuggestions" style="margin-top: 0.5rem; display: flex; flex-wrap: wrap; gap: 0.5rem;"></div>
+    </div>
+    
+    <div class="form-group">
+        <label class="form-label">Search by Filename:</label>
+        <input type="text" id="searchFilename" class="form-input" placeholder="e.g., IMG_2024">
+    </div>
+    
+    <div class="form-group">
+        <label class="form-label">Date Range:</label>
+        <div style="display: flex; gap: 1rem; align-items: center; flex-wrap: wrap;">
+            <div>
+                <label style="font-size: 0.875rem; color: var(--text-secondary);">From:</label>
+                <input type="date" id="dateFrom" class="form-input" style="width: auto;">
+            </div>
+            <div>
+                <label style="font-size: 0.875rem; color: var(--text-secondary);">To:</label>
+                <input type="date" id="dateTo" class="form-input" style="width: auto;">
+            </div>
+        </div>
+    </div>
+    
+    <div style="display: flex; gap: 1rem; align-items: center; flex-wrap: wrap;">
+        <button class="btn btn-primary" onclick="searchImages()">Search</button>
+        <button class="btn btn-secondary" onclick="clearSearch()">Clear</button>
+        
+        <label style="margin-left: auto;">
+            <input type="checkbox" id="matchAll" checked>
+            Match ALL tags (AND logic)
+        </label>
+        <label>
+            Filter:
+            <select id="filterTagged" class="form-select" style="width: auto;" onchange="loadImages()">
+                <option value="all">All Images</option>
+                <option value="tagged">Tagged Only</option>
+                <option value="untagged">Untagged Only</option>
+            </select>
+        </label>
+        <label>
+            Sort by:
+            <select id="sortBy" class="form-select" style="width: auto;" onchange="loadImages()">
+                <option value="filename">Filename</option>
+                <option value="filepath">Full Path</option>
+                <option value="file_size">File Size</option>
+                <option value="date_added">Date Added</option>
+                <option value="date_modified">Date Modified</option>
+            </select>
+        </label>
+        <label>
+            Per page:
+            <select id="perPage" class="form-select" style="width: auto;" onchange="loadImages()">
+                {% for option in items_per_page_options %}
+                <option value="{{ option }}" {% if option == default_items_per_page %}selected{% endif %}>{{ option }}</option>
+                {% endfor %}
+            </select>
+        </label>
+        <label>
+            Size:
+            <select id="thumbnailSize" class="form-select" style="width: auto;" onchange="changeThumbnailSize()">
+                <option value="150">Small</option>
+                <option value="250" selected>Medium</option>
+                <option value="350">Large</option>
+            </select>
+        </label>
+    </div>
+</div>
+
+<div class="card">
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
+        <div>
+            <input type="checkbox" id="selectAll" onchange="toggleSelectAll()">
+            <label for="selectAll">Select All</label>
+            <span id="selectedCount" style="margin-left: 1rem; color: var(--text-secondary);"></span>
+        </div>
+        <div style="display: flex; gap: 1rem; flex-wrap: wrap;">
+            <button class="btn btn-success" onclick="exportToCSV()" title="Export current view to CSV">
+                📊 Export CSV
+            </button>
+            <button class="btn btn-primary" onclick="downloadSelected()" id="downloadBtn" disabled>
+                💾 Download Selected
+            </button>
+            <button class="btn btn-secondary" onclick="printSelected()" id="printBtn" disabled>
+                🖨️ Print Selected
+            </button>
+        </div>
+    </div>
+    
+    <div id="imageCount" style="color: var(--text-secondary); margin-bottom: 1rem;"></div>
+    
+    <div id="imageGrid" class="image-grid">
+        <div class="loading">Loading images...</div>
+    </div>
+    
+    <div id="pagination" class="pagination"></div>
+</div>
+
+<!-- Lightbox -->
+<div id="lightbox" class="lightbox" onclick="closeLightbox()">
+    <span class="lightbox-close">&times;</span>
+    <span class="lightbox-nav lightbox-prev" onclick="event.stopPropagation(); navigateLightbox(-1)">&#10094;</span>
+    <img id="lightboxImage" class="lightbox-content">
+    <span class="lightbox-nav lightbox-next" onclick="event.stopPropagation(); navigateLightbox(1)">&#10095;</span>
+</div>
+
+<!-- Edit Tags Modal -->
+<div id="editTagsModal" class="modal" onclick="closeEditTagsModal()">
+    <div class="modal-content" onclick="event.stopPropagation()">
+        <h2>Edit Tags</h2>
+        <p id="editTagsImageName" style="color: var(--text-secondary); margin-bottom: 1rem;"></p>
+        
+        <div class="form-group">
+            <label class="form-label">Add Tags (comma-separated):</label>
+            <input type="text" id="editTagsInput" class="form-input" placeholder="e.g., baby, outdoor" autocomplete="off">
+            <div id="editTagsSuggestions" style="margin-top: 0.5rem; display: flex; flex-wrap: wrap; gap: 0.5rem;"></div>
+        </div>
+        
+        <div class="form-group">
+            <label class="form-label">Current Tags:</label>
+            <div id="editTagsCurrent" style="display: flex; flex-wrap: wrap; gap: 0.5rem; min-height: 2rem;"></div>
+        </div>
+        
+        <div style="display: flex; gap: 1rem; justify-content: flex-end; margin-top: 1.5rem;">
+            <button class="btn btn-secondary" onclick="closeEditTagsModal()">Cancel</button>
+            <button class="btn btn-primary" onclick="saveImageTags()">Save Tags</button>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let currentPage = 1;
+let totalPages = 1;
+let allImages = [];
+let selectedImages = new Set();
+let isSearchMode = false;
+let currentLightboxIndex = 0;
+let allTags = [];
+
+async function loadAllTags() {
+    console.log('[Search] Loading tags for suggestions...');
+    try {
+        const response = await fetch('/api/tags');
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
+        const data = await response.json();
+        allTags = data.tags;
+        console.log(`[Search] Loaded ${allTags.length} tags`);
+        displayTagSuggestions();
+    } catch (error) {
+        console.error('[Search] Error loading tags:', error);
+        // Don't block page load if tags fail
+    }
+}
+
+function displayTagSuggestions() {
+    const container = document.getElementById('tagSuggestions');
+    if (!container) return;
+    
+    const topTags = allTags.slice(0, 15);
+    
+    if (topTags.length > 0) {
+        container.innerHTML = '<small style="color: var(--text-secondary);">Quick Tags: </small>' +
+            topTags.map(tag => 
+                `<button type="button" class="btn btn-secondary" style="padding: 0.25rem 0.75rem; font-size: 0.75rem;" 
+                        onclick="addTagToSearch('${tag.tag_name}')">${tag.tag_name} (${tag.usage_count})</button>`
+            ).join('');
+    }
+}
+
+function addTagToSearch(tag) {
+    const input = document.getElementById('searchTags');
+    const currentValue = input.value.trim();
+    if (currentValue) {
+        const tags = currentValue.split(',').map(t => t.trim());
+        if (!tags.includes(tag)) {
+            input.value = currentValue + ', ' + tag;
+        }
+    } else {
+        input.value = tag;
+    }
+    input.focus();
+}
+
+async function loadImages() {
+    const perPage = document.getElementById('perPage').value;
+    const sortBy = document.getElementById('sortBy').value;
+    const filterTagged = document.getElementById('filterTagged').value;
+    const grid = document.getElementById('imageGrid');
+    
+    console.log('[Search] Loading images - page:', currentPage, 'per_page:', perPage, 'sort_by:', sortBy, 'filter:', filterTagged);
+    grid.innerHTML = '<div class="loading">Loading images from database...</div>';
+    
+    try {
+        const startTime = Date.now();
+        let url = `/api/images?page=${currentPage}&per_page=${perPage}&sort_by=${sortBy}`;
+        
+        if (filterTagged === 'tagged') {
+            url += '&tagged=true';
+        } else if (filterTagged === 'untagged') {
+            url += '&tagged=false';
+        }
+        
+        const response = await fetch(url);
+        
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
+        
+        const data = await response.json();
+        const loadTime = Date.now() - startTime;
+        
+        console.log(`[Search] Loaded ${data.images.length} images in ${loadTime}ms`);
+        
+        allImages = data.images;
+        totalPages = data.total_pages;
+        displayImages(allImages);
+        displayPagination(data);
+        updateImageCount(data.total);
+    } catch (error) {
+        console.error('[Search] Error loading images:', error);
+        grid.innerHTML = `
+            <div style="padding: 2rem; text-align: center; color: #dc2626;">
+                <h3>Error Loading Images</h3>
+                <p>${error.message}</p>
+                <button class="btn btn-primary" onclick="loadImages()" style="margin-top: 1rem;">Retry</button>
+            </div>
+        `;
+    }
+}
+
+async function searchImages() {
+    const tags = document.getElementById('searchTags').value.trim();
+    const filename = document.getElementById('searchFilename').value.trim();
+    const matchAll = document.getElementById('matchAll').checked;
+    const dateFrom = document.getElementById('dateFrom').value;
+    const dateTo = document.getElementById('dateTo').value;
+    
+    if (!tags && !filename && !dateFrom && !dateTo) {
+        loadImages();
+        return;
+    }
+    
+    const grid = document.getElementById('imageGrid');
+    grid.innerHTML = '<div class="loading">Searching...</div>';
+    
+    try {
+        let url = '/api/search?';
+        if (tags) url += `tags=${encodeURIComponent(tags)}&match_all=${matchAll}`;
+        if (filename) url += `${url.endsWith('?') ? '' : '&'}filename=${encodeURIComponent(filename)}`;
+        if (dateFrom) url += `${url.endsWith('?') ? '' : '&'}date_from=${dateFrom}`;
+        if (dateTo) url += `${url.endsWith('?') ? '' : '&'}date_to=${dateTo}`;
+        if (filename) url += `&q=${encodeURIComponent(filename)}`;
+        
+        console.log('[Search] Searching:', url);
+        const startTime = Date.now();
+        const response = await fetch(url);
+        
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
+        
+        const data = await response.json();
+        const searchTime = Date.now() - startTime;
+        console.log(`[Search] Found ${data.images.length} images in ${searchTime}ms`);
+        
+        allImages = data.images;
+        isSearchMode = true;
+        
+        displayImages(allImages);
+        updateImageCount(data.total);
+        document.getElementById('pagination').innerHTML = '';
+        
+    } catch (error) {
+        console.error('[Search] Error searching:', error);
+        grid.innerHTML = `
+            <div style="padding: 2rem; text-align: center; color: #dc2626;">
+                <h3>Search Error</h3>
+                <p>${error.message}</p>
+                <button class="btn btn-secondary" onclick="clearSearch()" style="margin-top: 1rem;">Clear Search</button>
+            </div>
+        `;
+    }
+}
+
+function clearSearch() {
+    document.getElementById('searchTags').value = '';
+    document.getElementById('searchFilename').value = '';
+    document.getElementById('dateFrom').value = '';
+    document.getElementById('dateTo').value = '';
+    isSearchMode = false;
+    currentPage = 1;
+    loadImages();
+}
+
+function displayImages(images) {
+    const grid = document.getElementById('imageGrid');
+    const thumbnailSize = document.getElementById('thumbnailSize').value;
+    
+    if (images.length === 0) {
+        grid.innerHTML = '<div class="loading">No images found</div>';
+        return;
+    }
+    
+    grid.style.gridTemplateColumns = `repeat(auto-fill, minmax(${thumbnailSize}px, 1fr))`;
+    
+    grid.innerHTML = images.map((img, idx) => `
+        <div class="image-item">
+            <input type="checkbox" 
+                   class="image-checkbox" 
+                   data-image-id="${img.id}"
+                   ${selectedImages.has(img.id) ? 'checked' : ''}
+                   onchange="toggleImageSelection(${img.id})">
+            <div class="image-wrapper" onclick="openLightbox(${idx})">
+                <img src="/thumbnails/${img.thumbnail_path}" 
+                     alt="${img.filename}" 
+                     loading="lazy"
+                     onerror="this.onerror=null; this.src='data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 width=%22200%22 height=%22200%22><rect width=%22200%22 height=%22200%22 fill=%22%23f3f4f6%22/><text x=%2250%%22 y=%2250%%22 text-anchor=%22middle%22 dy=%22.3em%22 font-family=%22sans-serif%22 font-size=%2214%22 fill=%22%23999%22>Missing</text></svg>'; this.style.border='2px dashed #dc2626';">
+            </div>
+            <div class="image-info">
+                <div class="image-filename" title="${img.filepath}">${img.filename}</div>
+                <div style="font-size: 0.75rem; color: var(--text-secondary);">
+                    ${(img.file_size / 1024).toFixed(1)} KB
+                </div>
+                <div style="font-size: 0.75rem; color: #888; word-break: break-all;">
+                    <span title="Relative path">${img.filepath}</span>
+                </div>
+                <div class="image-tags" style="min-height: 1.5rem;">
+                    ${img.tags && img.tags.length > 0 ? img.tags.map(tag => 
+                        `<span class="tag" style="cursor: pointer;" onclick="event.stopPropagation(); removeTagFromImage(${img.id}, ${tag.id}, '${tag.tag_name}')" title="Click to remove">${tag.tag_name} ×</span>`
+                    ).join('') : '<span style="color: var(--text-secondary); font-size: 0.75rem;">No tags</span>'}
+                    <button onclick="event.stopPropagation(); openEditTagsModal(${img.id}, '${img.filename.replace(/'/g, "\\'")}', ${JSON.stringify(img.tags || []).replace(/"/g, '&quot;')})" 
+                            class="btn btn-secondary" 
+                            style="padding: 0.2rem 0.5rem; font-size: 0.7rem; margin-left: 0.25rem;">
+                        + Tag
+                    </button>
+                </div>
+            </div>
+        </div>
+    `).join('');
+}
+
+function displayPagination(data) {
+    const pagination = document.getElementById('pagination');
+    
+    if (data.total_pages <= 1) {
+        pagination.innerHTML = '';
+        return;
+    }
+    
+    let html = `
+        <button onclick="goToPage(1)" ${currentPage === 1 ? 'disabled' : ''} title="First page">
+            &laquo;
+        </button>
+        <button onclick="goToPage(${currentPage - 1})" ${currentPage === 1 ? 'disabled' : ''} title="Previous page">
+            &lsaquo;
+        </button>
+    `;
+    
+    // Smart page number display
+    const maxVisible = 7; // Max page buttons to show
+    let startPage, endPage;
+    
+    if (data.total_pages <= maxVisible) {
+        startPage = 1;
+        endPage = data.total_pages;
+    } else {
+        const halfVisible = Math.floor(maxVisible / 2);
+        if (currentPage <= halfVisible) {
+            startPage = 1;
+            endPage = maxVisible;
+        } else if (currentPage >= data.total_pages - halfVisible) {
+            startPage = data.total_pages - maxVisible + 1;
+            endPage = data.total_pages;
+        } else {
+            startPage = currentPage - halfVisible;
+            endPage = currentPage + halfVisible;
+        }
+    }
+    
+    if (startPage > 1) {
+        html += `<button onclick="goToPage(1)">1</button>`;
+        if (startPage > 2) {
+            html += '<span style="padding: 0 0.5rem;">...</span>';
+        }
+    }
+    
+    for (let i = startPage; i <= endPage; i++) {
+        html += `
+            <button onclick="goToPage(${i})" class="${i === currentPage ? 'active' : ''}">
+                ${i}
+            </button>
+        `;
+    }
+    
+    if (endPage < data.total_pages) {
+        if (endPage < data.total_pages - 1) {
+            html += '<span style="padding: 0 0.5rem;">...</span>';
+        }
+        html += `<button onclick="goToPage(${data.total_pages})">${data.total_pages}</button>`;
+    }
+    
+    html += `
+        <button onclick="goToPage(${currentPage + 1})" ${currentPage === data.total_pages ? 'disabled' : ''} title="Next page">
+            &rsaquo;
+        </button>
+        <button onclick="goToPage(${data.total_pages})" ${currentPage === data.total_pages ? 'disabled' : ''} title="Last page">
+            &raquo;
+        </button>
+        <span style="margin-left: 1rem; color: var(--text-secondary);">
+            Page ${currentPage} of ${data.total_pages}
+        </span>
+    `;
+    
+    pagination.innerHTML = html;
+}
+
+function goToPage(page) {
+    currentPage = page;
+    loadImages();
+    window.scrollTo(0, 0);
+}
+
+function changeThumbnailSize() {
+    displayImages(allImages);
+}
+
+function updateImageCount(total) {
+    document.getElementById('imageCount').textContent = `Showing ${allImages.length} of ${total} images`;
+}
+
+function toggleImageSelection(imageId) {
+    if (selectedImages.has(imageId)) {
+        selectedImages.delete(imageId);
+    } else {
+        selectedImages.add(imageId);
+    }
+    updateSelectedCount();
+}
+
+function toggleSelectAll() {
+    const selectAll = document.getElementById('selectAll').checked;
+    
+    if (selectAll) {
+        allImages.forEach(img => selectedImages.add(img.id));
+    } else {
+        allImages.forEach(img => selectedImages.delete(img.id));
+    }
+    
+    document.querySelectorAll('.image-checkbox').forEach(cb => {
+        cb.checked = selectAll;
+    });
+    
+    updateSelectedCount();
+}
+
+function updateSelectedCount() {
+    const count = selectedImages.size;
+    document.getElementById('selectedCount').textContent = 
+        count > 0 ? `${count} selected` : '';
+    
+    document.getElementById('downloadBtn').disabled = count === 0;
+    document.getElementById('printBtn').disabled = count === 0;
+}
+
+async function downloadSelected() {
+    if (selectedImages.size === 0) return;
+    
+    const imageIds = Array.from(selectedImages);
+    
+    // Show progress modal
+    const progressHtml = `
+        <div id="downloadProgressModal" class="modal active">
+            <div class="modal-content" onclick="event.stopPropagation()" style="max-width: 500px;">
+                <h2>Creating Download</h2>
+                <p id="downloadProgressText">Preparing download...</p>
+                <div style="background: var(--card-bg); border-radius: 8px; padding: 0.5rem; margin: 1rem 0;">
+                    <div id="downloadProgressBar" style="background: var(--primary-color); height: 24px; border-radius: 4px; width: 0%; transition: width 0.3s;"></div>
+                </div>
+                <p style="text-align: center; color: var(--text-secondary);" id="downloadProgressCount">0 / ${imageIds.length}</p>
+            </div>
+        </div>
+    `;
+    document.body.insertAdjacentHTML('beforeend', progressHtml);
+
+    try {
+        // Start download process
+        const response = await fetch('/api/download/progress', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ image_ids: imageIds })
+        });
+        
+        if (!response.ok) throw new Error('Download failed to start');
+
+        // Listen for progress updates
+        const eventSource = new EventSource('/api/download/status');
+
+        eventSource.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            const progress = (data.current / data.total) * 100;
+
+            document.getElementById('downloadProgressBar').style.width = progress + '%';
+            document.getElementById('downloadProgressCount').textContent = `${data.current} / ${data.total}`;
+            document.getElementById('downloadProgressText').textContent = `Adding images to ZIP...`;
+
+            if (data.done) {
+                eventSource.close();
+
+                if (data.error) {
+                    document.getElementById('downloadProgressText').textContent = 'Error: ' + data.error;
+                    setTimeout(() => {
+                        document.getElementById('downloadProgressModal').remove();
+                    }, 3000);
+                } else {
+                    document.getElementById('downloadProgressText').textContent = 'Download ready!';
+
+                    // Download the file
+                    window.location.href = `/api/download/file/${data.filename}`;
+
+                    setTimeout(() => {
+                        document.getElementById('downloadProgressModal').remove();
+                    }, 1000);
+                }
+            }
+        };
+
+        eventSource.onerror = () => {
+            eventSource.close();
+            document.getElementById('downloadProgressText').textContent = 'Error creating download';
+            setTimeout(() => {
+                document.getElementById('downloadProgressModal').remove();
+            }, 2000);
+        };
+
+    } catch (error) {
+        console.error('Error downloading:', error);
+        document.getElementById('downloadProgressModal').remove();
+        alert('Error downloading images. Please try again.');
+    }
+}
+
+async function exportToCSV() {
+    const imageIds = Array.from(selectedImages);
+    const exportAll = imageIds.length === 0;
+
+    if (!exportAll && imageIds.length === 0) {
+        alert('Please select images to export, or use the "Export All" button.');
+        return;
+    }
+
+    try {
+        const response = await fetch('/api/export/csv', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                image_ids: imageIds,
+                export_all: exportAll
+            })
+        });
+
+        if (!response.ok) throw new Error('Export failed');
+
+        const blob = await response.blob();
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `filecat_export_${Date.now()}.csv`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        window.URL.revokeObjectURL(url);
+        
+    } catch (error) {
+        console.error('Error exporting:', error);
+        alert('Error exporting to CSV. Please try again.');
+    }
+}
+
+function printSelected() {
+    if (selectedImages.size === 0) {
+        alert('Please select images to print.');
+        return;
+    }
+
+    const imageIds = Array.from(selectedImages);
+
+    // Show print options modal
+    const modalHtml = `
+        <div id="printModal" class="modal active" onclick="closePrintModal()">
+            <div class="modal-content" onclick="event.stopPropagation()" style="max-width: 500px;">
+                <h2>Print Options</h2>
+                <p style="color: var(--text-secondary); margin-bottom: 1rem;">${imageIds.length} images selected</p>
+
+                <div class="form-group">
+                    <label class="form-label">Images per page:</label>
+                    <select id="printLayout" class="form-select">
+                        <option value="1">1 per page (full size)</option>
+                        <option value="2">2 per page</option>
+                        <option value="4" selected>4 per page (grid)</option>
+                        <option value="6">6 per page (grid)</option>
+                        <option value="9">9 per page (contact sheet)</option>
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">Page Size:</label>
+                    <select id="printPageSize" class="form-select">
+                        <option value="letter" selected>Letter</option>
+                        <option value="a4">A4</option>
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">Orientation:</label>
+                    <select id="printOrientation" class="form-select">
+                        <option value="portrait" selected>Portrait</option>
+                        <option value="landscape">Landscape</option>
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <label>
+                        <input type="checkbox" id="printIncludeInfo" checked>
+                        Include filename and tags
+                    </label>
+                </div>
+
+                <div style="display: flex; gap: 1rem; justify-content: flex-end; margin-top: 1.5rem;">
+                    <button class="btn btn-secondary" onclick="closePrintModal()">Cancel</button>
+                    <button class="btn btn-primary" onclick="generatePDF()">Generate PDF</button>
+                </div>
+            </div>
+        </div>
+    `;
+
+    document.body.insertAdjacentHTML('beforeend', modalHtml);
+}
+
+function closePrintModal() {
+    const modal = document.getElementById('printModal');
+    if (modal) modal.remove();
+}
+
+async function generatePDF() {
+    const imageIds = Array.from(selectedImages);
+    const layout = document.getElementById('printLayout').value;
+    const pageSize = document.getElementById('printPageSize').value;
+    const orientation = document.getElementById('printOrientation').value;
+    const includeInfo = document.getElementById('printIncludeInfo').checked;
+
+    closePrintModal();
+
+    // Show generating message
+    const progressHtml = `
+        <div id="pdfProgressModal" class="modal active">
+            <div class="modal-content" onclick="event.stopPropagation()" style="max-width: 400px;">
+                <h2>Generating PDF</h2>
+                <p>Please wait while we create your PDF...</p>
+                <div class="loading" style="margin: 2rem 0;"></div>
+            </div>
+        </div>
+    `;
+    document.body.insertAdjacentHTML('beforeend', progressHtml);
+
+    try {
+        const response = await fetch('/api/print/pdf', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                image_ids: imageIds,
+                layout: layout,
+                page_size: pageSize,
+                orientation: orientation,
+                include_info: includeInfo
+            })
+        });
+
+        if (!response.ok) throw new Error('PDF generation failed');
+
+        const blob = await response.blob();
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `filecat_print_${Date.now()}.pdf`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        window.URL.revokeObjectURL(url);
+
+        document.getElementById('pdfProgressModal').remove();
+
+    } catch (error) {
+        console.error('Error generating PDF:', error);
+        document.getElementById('pdfProgressModal').remove();
+        alert('Error generating PDF. Please try again.');
+    }
+}
+
+function openLightbox(index) {
+    currentLightboxIndex = index;
+    const image = allImages[index];
+    document.getElementById('lightboxImage').src = `/images/${image.filepath}`;
+    document.getElementById('lightbox').classList.add('active');
+}
+
+function closeLightbox() {
+    document.getElementById('lightbox').classList.remove('active');
+}
+
+function navigateLightbox(direction) {
+    currentLightboxIndex += direction;
+    if (currentLightboxIndex < 0) currentLightboxIndex = allImages.length - 1;
+    if (currentLightboxIndex >= allImages.length) currentLightboxIndex = 0;
+    
+    const image = allImages[currentLightboxIndex];
+    document.getElementById('lightboxImage').src = `/images/${image.filepath}`;
+}
+
+// Keyboard navigation
+document.addEventListener('keydown', (e) => {
+    const lightbox = document.getElementById('lightbox');
+    if (!lightbox.classList.contains('active')) return;
+    
+    if (e.key === 'Escape') closeLightbox();
+    if (e.key === 'ArrowLeft') navigateLightbox(-1);
+    if (e.key === 'ArrowRight') navigateLightbox(1);
+});
+
+// Tag editing functions
+let currentEditImageId = null;
+
+function openEditTagsModal(imageId, filename, currentTags) {
+    currentEditImageId = imageId;
+    document.getElementById('editTagsImageName').textContent = filename;
+    document.getElementById('editTagsInput').value = '';
+    
+    // Display current tags
+    const container = document.getElementById('editTagsCurrent');
+    if (currentTags && currentTags.length > 0) {
+        container.innerHTML = currentTags.map(tag => 
+            `<span class="tag" style="cursor: pointer;" onclick="removeTagFromImageInModal(${tag.id}, '${tag.tag_name}')" title="Click to remove">${tag.tag_name} ×</span>`
+        ).join('');
+    } else {
+        container.innerHTML = '<span style="color: var(--text-secondary); font-size: 0.875rem;">No tags yet</span>';
+    }
+    
+    // Show tag suggestions
+    displayEditTagSuggestions();
+    
+    document.getElementById('editTagsModal').classList.add('active');
+}
+
+function closeEditTagsModal() {
+    document.getElementById('editTagsModal').classList.remove('active');
+    currentEditImageId = null;
+}
+
+function displayEditTagSuggestions() {
+    const container = document.getElementById('editTagsSuggestions');
+    const topTags = allTags.slice(0, 15);
+    
+    if (topTags.length > 0) {
+        container.innerHTML = '<small style="color: var(--text-secondary);">Quick Tags: </small>' +
+            topTags.map(tag => 
+                `<button type="button" class="btn btn-secondary" style="padding: 0.25rem 0.75rem; font-size: 0.75rem;" 
+                        onclick="addTagToEditInput('${tag.tag_name}')">${tag.tag_name}</button>`
+            ).join('');
+    }
+}
+
+function addTagToEditInput(tag) {
+    const input = document.getElementById('editTagsInput');
+    const currentValue = input.value.trim();
+    if (currentValue) {
+        input.value = currentValue + ', ' + tag;
+    } else {
+        input.value = tag;
+    }
+    input.focus();
+}
+
+async function saveImageTags() {
+    const tagsInput = document.getElementById('editTagsInput').value.trim();
+    
+    if (!tagsInput) {
+        closeEditTagsModal();
+        return;
+    }
+    
+    try {
+        const response = await fetch(`/api/images/${currentEditImageId}/tags`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ tags: tagsInput })
+        });
+        
+        if (!response.ok) {
+            throw new Error('Failed to save tags');
+        }
+        
+        // Reload tags and images
+        await loadAllTags();
+        await loadImages();
+        closeEditTagsModal();
+    } catch (error) {
+        console.error('Error saving tags:', error);
+        alert('Error saving tags. Please try again.');
+    }
+}
+
+async function removeTagFromImage(imageId, tagId, tagName) {
+    if (!confirm(`Remove tag "${tagName}" from this image?`)) return;
+    
+    try {
+        const response = await fetch(`/api/images/${imageId}/tags/${tagId}`, {
+            method: 'DELETE'
+        });
+        
+        if (!response.ok) {
+            throw new Error('Failed to remove tag');
+        }
+        
+        // Reload images to update display
+        await loadImages();
+    } catch (error) {
+        console.error('Error removing tag:', error);
+        alert('Error removing tag. Please try again.');
+    }
+}
+
+async function removeTagFromImageInModal(tagId, tagName) {
+    if (!confirm(`Remove tag "${tagName}"?`)) return;
+    
+    try {
+        const response = await fetch(`/api/images/${currentEditImageId}/tags/${tagId}`, {
+            method: 'DELETE'
+        });
+        
+        if (!response.ok) {
+            throw new Error('Failed to remove tag');
+        }
+        
+        // Reload the modal to show updated tags
+        const imgResponse = await fetch(`/api/images/${currentEditImageId}`);
+        const imgData = await imgResponse.json();
+        
+        const container = document.getElementById('editTagsCurrent');
+        if (imgData.tags && imgData.tags.length > 0) {
+            container.innerHTML = imgData.tags.map(tag => 
+                `<span class="tag" style="cursor: pointer;" onclick="removeTagFromImageInModal(${tag.id}, '${tag.tag_name}')" title="Click to remove">${tag.tag_name} ×</span>`
+            ).join('');
+        } else {
+            container.innerHTML = '<span style="color: var(--text-secondary); font-size: 0.875rem;">No tags yet</span>';
+        }
+        
+        // Also reload the main view
+        await loadImages();
+    } catch (error) {
+        console.error('Error removing tag:', error);
+        alert('Error removing tag. Please try again.');
+    }
+}
+
+// Load images on page load
+console.log('[Search] Page initialized, loading data...');
+loadAllTags();
+loadImages();
+</script>
+{% endblock %}

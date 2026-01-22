@@ -1,0 +1,355 @@
+{% extends "base.html" %}
+
+{% block title %}Maintenance - FileCat{% endblock %}
+
+{% block content %}
+<h1>Maintenance Mode - Tag Images</h1>
+
+<div class="card">
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
+        <div id="progress">Loading...</div>
+        <div>
+            <button class="btn btn-secondary" onclick="previousImage()" id="prevBtn">← Previous</button>
+            <button class="btn btn-secondary" onclick="skipImage()">Skip</button>
+            <button class="btn btn-primary" onclick="saveAndNext()">Save & Next →</button>
+        </div>
+    </div>
+
+    <div id="imageContainer" style="text-align: center; margin: 2rem 0;">
+        <div class="loading">Loading images...</div>
+    </div>
+
+    <div id="taggingForm" style="display: none;">
+        <div class="form-group">
+            <label class="form-label">Image Path:</label>
+            <div id="imagePath" style="color: var(--text-secondary); font-size: 0.875rem; margin-bottom: 1rem;"></div>
+        </div>
+
+        <div class="form-group">
+            <label class="form-label" for="tagsInput">Tags (comma-separated):</label>
+            <input 
+                type="text" 
+                id="tagsInput" 
+                class="form-input" 
+                placeholder="e.g., baby, outdoor, summer, 2024"
+                autocomplete="off"
+            >
+            <div id="tagSuggestions" style="margin-top: 0.5rem; display: flex; flex-wrap: wrap; gap: 0.5rem;"></div>
+        </div>
+
+        <div class="form-group" id="aiSuggestionsContainer" style="display: none;">
+            <label class="form-label">🤖 AI Suggestions:</label>
+            <div style="display: flex; gap: 0.5rem; align-items: center; margin-bottom: 0.5rem;">
+                <button type="button" class="btn btn-primary" onclick="getAISuggestions()" id="aiAnalyzeBtn" style="padding: 0.4rem 1rem; font-size: 0.875rem;">
+                    Analyze with AI
+                </button>
+                <button type="button" class="btn btn-success" onclick="acceptAllAISuggestions()" id="aiAcceptAllBtn" style="display: none; padding: 0.4rem 1rem; font-size: 0.875rem;">
+                    ✓ Accept All
+                </button>
+                <span id="aiStatus" style="color: var(--text-secondary); font-size: 0.875rem;"></span>
+            </div>
+            <div id="aiSuggestions" style="display: flex; flex-wrap: wrap; gap: 0.5rem;"></div>
+        </div>
+
+        <div class="form-group">
+            <label class="form-label">Current Tags:</label>
+            <div id="currentTags" style="display: flex; flex-wrap: wrap; gap: 0.5rem;">
+                <span style="color: var(--text-secondary); font-size: 0.875rem;">No tags yet</span>
+            </div>
+        </div>
+    </div>
+
+    <div id="completedMessage" style="display: none; text-align: center; padding: 3rem;">
+        <h2 style="color: var(--success-color);">🎉 All Done!</h2>
+        <p style="color: var(--text-secondary); margin-top: 1rem;">
+            All images have been tagged. Great job!
+        </p>
+        <a href="/" class="btn btn-primary" style="margin-top: 1rem;">Back to Dashboard</a>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let untaggedImages = [];
+let currentIndex = 0;
+let allTags = [];
+
+async function loadUntaggedImages() {
+    try {
+        const response = await fetch('/api/images/untagged');
+        const data = await response.json();
+        untaggedImages = data.images;
+        
+        if (untaggedImages.length === 0) {
+            document.getElementById('imageContainer').style.display = 'none';
+            document.getElementById('taggingForm').style.display = 'none';
+            document.getElementById('completedMessage').style.display = 'block';
+            return;
+        }
+        
+        await loadAllTags();
+        displayCurrentImage();
+    } catch (error) {
+        console.error('Error loading images:', error);
+    }
+}
+
+async function loadAllTags() {
+    try {
+        const response = await fetch('/api/tags');
+        const data = await response.json();
+        allTags = data.tags;
+    } catch (error) {
+        console.error('Error loading tags:', error);
+    }
+}
+
+function displayCurrentImage() {
+    if (currentIndex >= untaggedImages.length) {
+        location.reload();
+        return;
+    }
+    
+    const image = untaggedImages[currentIndex];
+    const container = document.getElementById('imageContainer');
+    const form = document.getElementById('taggingForm');
+    
+    container.innerHTML = `
+        <img src="/thumbnails/${image.thumbnail_path}" 
+             alt="${image.filename}"
+             style="max-width: 100%; max-height: 500px; border-radius: 8px; box-shadow: var(--shadow);"
+             onclick="viewFullSize('${image.filepath}')">
+    `;
+    
+    document.getElementById('imagePath').textContent = image.filepath;
+    document.getElementById('tagsInput').value = '';
+    document.getElementById('progress').textContent = 
+        `Image ${currentIndex + 1} of ${untaggedImages.length}`;
+    
+    // Display current tags
+    displayCurrentTags(image.tags);
+    
+    // Show tag suggestions
+    displayTagSuggestions();
+    
+    form.style.display = 'block';
+    document.getElementById('prevBtn').disabled = currentIndex === 0;
+    
+    // Focus on input
+    document.getElementById('tagsInput').focus();
+}
+
+function displayCurrentTags(tags) {
+    const container = document.getElementById('currentTags');
+    if (tags && tags.length > 0) {
+        container.innerHTML = tags.map(tag => 
+            `<span class="tag">${tag.tag_name}</span>`
+        ).join('');
+    } else {
+        container.innerHTML = '<span style="color: var(--text-secondary); font-size: 0.875rem;">No tags yet</span>';
+    }
+}
+
+function displayTagSuggestions() {
+    const container = document.getElementById('tagSuggestions');
+    const topTags = allTags.slice(0, 10);
+    
+    if (topTags.length > 0) {
+        container.innerHTML = '<small style="color: var(--text-secondary);">Suggestions: </small>' +
+            topTags.map(tag => 
+                `<button type="button" class="btn btn-secondary" style="padding: 0.25rem 0.75rem; font-size: 0.75rem;" 
+                        onclick="addTagToInput('${tag.tag_name}')">${tag.tag_name}</button>`
+            ).join('');
+    }
+}
+
+function addTagToInput(tag) {
+    const input = document.getElementById('tagsInput');
+    const currentValue = input.value.trim();
+    if (currentValue) {
+        input.value = currentValue + ', ' + tag;
+    } else {
+        input.value = tag;
+    }
+    input.focus();
+}
+
+async function saveAndNext() {
+    const image = untaggedImages[currentIndex];
+    const tagsInput = document.getElementById('tagsInput').value;
+    
+    if (tagsInput.trim()) {
+        try {
+            await fetch(`/api/images/${image.id}/tags`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ tags: tagsInput })
+            });
+            // Reload tags to refresh suggestions with any new tags
+            await loadAllTags();
+        } catch (error) {
+            console.error('Error saving tags:', error);
+            alert('Error saving tags. Please try again.');
+            return;
+        }
+    } else {
+        // Mark as tagged even without tags
+        try {
+            await fetch(`/api/images/${image.id}/tags`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ tags: '' })
+            });
+        } catch (error) {
+            console.error('Error updating image:', error);
+        }
+    }
+    
+    currentIndex++;
+    displayCurrentImage();
+}
+
+function skipImage() {
+    currentIndex++;
+    displayCurrentImage();
+}
+
+function previousImage() {
+    if (currentIndex > 0) {
+        currentIndex--;
+        displayCurrentImage();
+    }
+}
+
+function viewFullSize(filepath) {
+    window.open(`/images/${filepath}`, '_blank');
+}
+
+// AI Auto-Tagging Functions - Phase 2 Feature
+let currentAISuggestions = [];
+
+async function getAISuggestions() {
+    if (currentIndex >= untaggedImages.length) return;
+
+    const image = untaggedImages[currentIndex];
+    const analyzeBtn = document.getElementById('aiAnalyzeBtn');
+    const statusEl = document.getElementById('aiStatus');
+
+    analyzeBtn.disabled = true;
+    analyzeBtn.textContent = 'Analyzing...';
+    statusEl.textContent = 'AI is analyzing the image...';
+
+    try {
+        const response = await fetch(`/api/ai/analyze/${image.id}`, {
+            method: 'POST'
+        });
+
+        if (!response.ok) throw new Error('Analysis failed');
+
+        const data = await response.json();
+
+        if (data.success) {
+            currentAISuggestions = data.suggestions;
+            displayAISuggestions(data.suggestions);
+            statusEl.textContent = `Found ${data.suggestions.length} suggestions`;
+        } else {
+            statusEl.textContent = 'No suggestions found';
+        }
+    } catch (error) {
+        console.error('Error getting AI suggestions:', error);
+        statusEl.textContent = 'Error analyzing image';
+    } finally {
+        analyzeBtn.disabled = false;
+        analyzeBtn.textContent = 'Analyze with AI';
+    }
+}
+
+function displayAISuggestions(suggestions) {
+    const container = document.getElementById('aiSuggestions');
+    const acceptAllBtn = document.getElementById('aiAcceptAllBtn');
+
+    if (suggestions && suggestions.length > 0) {
+        container.innerHTML = suggestions.map((s, idx) => `
+            <button type="button" class="btn btn-success"
+                    style="padding: 0.4rem 0.75rem; font-size: 0.875rem; position: relative;"
+                    onclick="acceptAISuggestion('${s.tag}', ${idx})"
+                    id="aiSuggestion${idx}">
+                ${s.tag} <span style="opacity: 0.7; font-size: 0.75rem;">(${Math.round(s.confidence * 100)}%)</span>
+            </button>
+        `).join('');
+        acceptAllBtn.style.display = 'inline-block';
+    } else {
+        container.innerHTML = '<span style="color: var(--text-secondary); font-size: 0.875rem;">Click "Analyze with AI" to get suggestions</span>';
+        acceptAllBtn.style.display = 'none';
+    }
+}
+
+async function acceptAISuggestion(tag, index) {
+    // Add tag to input
+    const input = document.getElementById('tagsInput');
+    const currentValue = input.value.trim();
+
+    if (currentValue) {
+        const tags = currentValue.split(',').map(t => t.trim());
+        if (!tags.includes(tag)) {
+            input.value = currentValue + ', ' + tag;
+        }
+    } else {
+        input.value = tag;
+    }
+
+    // Remove from suggestions
+    const btn = document.getElementById(`aiSuggestion${index}`);
+    if (btn) {
+        btn.remove();
+    }
+
+    currentAISuggestions = currentAISuggestions.filter((s, i) => i !== index);
+
+    // Hide accept all button if no more suggestions
+    if (currentAISuggestions.length === 0) {
+        document.getElementById('aiAcceptAllBtn').style.display = 'none';
+    }
+}
+
+async function acceptAllAISuggestions() {
+    const input = document.getElementById('tagsInput');
+    const currentValue = input.value.trim();
+    const existingTags = currentValue ? currentValue.split(',').map(t => t.trim()) : [];
+
+    // Add all AI suggestions that aren't already in the input
+    const newTags = currentAISuggestions
+        .map(s => s.tag)
+        .filter(tag => !existingTags.includes(tag));
+
+    if (newTags.length > 0) {
+        const allTags = [...existingTags, ...newTags].join(', ');
+        input.value = allTags;
+    }
+
+    // Clear AI suggestions
+    document.getElementById('aiSuggestions').innerHTML =
+        '<span style="color: var(--text-secondary); font-size: 0.875rem;">All suggestions accepted!</span>';
+    document.getElementById('aiAcceptAllBtn').style.display = 'none';
+    document.getElementById('aiStatus').textContent = 'All suggestions added to tags';
+    currentAISuggestions = [];
+}
+
+// Show AI suggestions container on page load
+document.addEventListener('DOMContentLoaded', () => {
+    document.getElementById('aiSuggestionsContainer').style.display = 'block';
+});
+
+// Enter key to save and next
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && e.target.id === 'tagsInput') {
+        e.preventDefault();
+        saveAndNext();
+    }
+});
+
+// Load images on page load
+loadUntaggedImages();
+</script>
+{% endblock %}
