@@ -7,7 +7,7 @@ import os
 import sys
 import threading
 import warnings
-from PIL import Image
+from PIL import Image, ImageFile
 
 # Suppress FutureWarning from timm library (used by RAM model)
 warnings.filterwarnings('ignore', category=FutureWarning, module='timm')
@@ -16,9 +16,12 @@ warnings.filterwarnings('ignore', category=FutureWarning, module='timm')
 # Default is ~178MP, we increase to 1000MP (1 gigapixel) for safety
 Image.MAX_IMAGE_PIXELS = 1000000000  # 1 gigapixel limit
 
+# Allow PIL to load truncated/corrupted images (load as much as possible)
+ImageFile.LOAD_TRUNCATED_IMAGES = True
+
 # Add STAG to path
 # Set this to your STAG installation directory
-STAG_PATH = os.environ.get('STAG_PATH', os.path.join(os.path.dirname(__file__), '..', 'stag'))
+STAG_PATH = os.environ.get('STAG_PATH', os.path.join(os.path.dirname(__file__), 'stag'))
 if STAG_PATH not in sys.path:
     sys.path.insert(0, STAG_PATH)
 
@@ -76,7 +79,7 @@ def get_model():
     return _model, _transform, _device
 
 
-def analyze_image(image_path, tag_candidates=None, threshold=0.0, max_tags=20):
+def analyze_image(image_path, tag_candidates=None, threshold=0.0, max_tags=20, image_id=None):
     """
     Analyze an image and return suggested tags using STAG/RAM
     
@@ -85,11 +88,12 @@ def analyze_image(image_path, tag_candidates=None, threshold=0.0, max_tags=20):
         tag_candidates: Not used with STAG (model generates its own tags)
         threshold: Not used with STAG (model handles confidence internally)
         max_tags: Maximum number of tags to return (default: 20)
-    
+        image_id: Optional database ID to mark corrupted images
+
     Returns:
         List of tuples: (tag_name, confidence_score)
-        Note: STAG returns tags without individual confidence scores,
-        so all returned tags get a confidence of 1.0
+        Returns None if image is corrupted and image_id provided (marks in DB)
+        Returns empty list if image is corrupted and no image_id provided
     """
     import time
     start_time = time.time()
@@ -107,7 +111,34 @@ def analyze_image(image_path, tag_candidates=None, threshold=0.0, max_tags=20):
         # Load and preprocess image
         print(f"[AI DEBUG] Loading image from disk...")
         load_start = time.time()
-        pil_image = Image.open(image_path).convert('RGB')
+        try:
+            pil_image = Image.open(image_path).convert('RGB')
+        except (OSError, IOError) as img_error:
+            # Handle corrupted or truncated images
+            load_time = time.time() - load_start
+            print(f"[AI DEBUG] ❌ Image file corrupted or truncated after {load_time:.2f}s: {img_error}")
+
+            # Mark in database if image_id provided
+            if image_id is not None:
+                from database import update_image_integrity
+                error_msg = str(img_error)
+                update_image_integrity(image_id, 'corrupted', error_msg)
+                print(f"[AI DEBUG] 🗄️ Marked image ID {image_id} as corrupted in database")
+                return None  # Return None to signal corruption when ID provided
+
+            # Try to load what we can with LOAD_TRUNCATED_IMAGES enabled
+            try:
+                from PIL import ImageFile
+                ImageFile.LOAD_TRUNCATED_IMAGES = True
+                img = Image.open(image_path)
+                pil_image = img.convert('RGB')
+                print(f"[AI DEBUG] ⚠️ Loaded truncated image successfully")
+            except Exception as recovery_error:
+                # Cannot recover - return empty list (or None if tracking)
+                print(f"[AI DEBUG] ❌ Cannot recover corrupted image: {recovery_error}")
+                total_time = time.time() - start_time
+                return None if image_id else []  # Return None if tracking, empty list otherwise
+
         load_time = time.time() - load_start
         print(f"[AI DEBUG] Image loaded in {load_time:.2f}s - Size: {pil_image.size}")
 
@@ -156,7 +187,7 @@ def analyze_image(image_path, tag_candidates=None, threshold=0.0, max_tags=20):
         print(f"[AI DEBUG] ❌ Error after {total_time:.2f}s analyzing {image_path}: {e}")
         import traceback
         traceback.print_exc()
-        return []
+        return []  # CRITICAL: Must return empty list to mark image as processed
 
 
 def analyze_image_batch(image_paths, tag_candidates=None, threshold=0.0, max_tags=20, progress_callback=None):
@@ -202,7 +233,7 @@ def get_top_tags(image_path, top_n=10, threshold=0.0):
     return [tag for tag, score in tags_with_scores]
 
 
-def suggest_tags_for_maintenance(image_path, existing_tags=None, threshold=0.0, max_suggestions=10):
+def suggest_tags_for_maintenance(image_path, existing_tags=None, threshold=0.0, max_suggestions=10, image_id=None):
     """
     Suggest tags for an image in maintenance mode
     Filters out tags that are already applied
@@ -212,9 +243,11 @@ def suggest_tags_for_maintenance(image_path, existing_tags=None, threshold=0.0, 
         existing_tags: List of tag names already applied to this image
         threshold: Not used with STAG
         max_suggestions: Maximum number of suggestions
-    
+        image_id: Optional database ID for corruption tracking
+
     Returns:
         List of tuples: (tag_name, confidence_score)
+        Returns None if image is corrupted
     """
     if existing_tags is None:
         existing_tags = []
@@ -223,8 +256,13 @@ def suggest_tags_for_maintenance(image_path, existing_tags=None, threshold=0.0, 
     existing_tags_lower = [tag.lower() for tag in existing_tags]
     
     # Get AI suggestions (STAG typically returns 10-30 tags)
-    all_suggestions = analyze_image(image_path, threshold=threshold, max_tags=max_suggestions * 2)
-    
+    # Pass image_id for corruption tracking
+    all_suggestions = analyze_image(image_path, threshold=threshold, max_tags=max_suggestions * 2, image_id=image_id)
+
+    # Check for corruption (None return value indicates corrupted and marked)
+    if all_suggestions is None:
+        return None
+
     # Filter out existing tags
     new_suggestions = [
         (tag, score) for tag, score in all_suggestions

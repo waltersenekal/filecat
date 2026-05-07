@@ -6,8 +6,8 @@ import os
 # Base directory
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# Source folder containing images (relative to BASE_DIR)
-SOURCE_FOLDER = os.path.join(BASE_DIR, 'Digital Papers')
+# Source folder containing images (configurable path)
+SOURCE_FOLDER = os.environ.get('FILECAT_SOURCE_FOLDER', r'D:\Clipart and Digital Paper')
 
 # Thumbnail storage
 THUMBNAIL_FOLDER = os.path.join(BASE_DIR, 'thumbnails')

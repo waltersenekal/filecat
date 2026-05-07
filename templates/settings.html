@@ -51,6 +51,28 @@
 </div>
 
 <div class="card">
+    <h2 class="card-title">🔍 File Integrity Management</h2>
+
+    <p style="color: var(--text-secondary); margin-bottom: 1rem;">
+        Check your database for missing or corrupted files, and scan for new files to add.
+    </p>
+
+    <div style="display: flex; gap: 1rem; flex-wrap: wrap; margin-bottom: 1rem;">
+        <button class="btn btn-primary" onclick="runIntegrityScan()">
+            🔎 Full Integrity Scan
+        </button>
+        <button class="btn btn-secondary" onclick="scanForNewFiles()">
+            ➕ Scan for New Files
+        </button>
+        <button class="btn btn-secondary" onclick="cleanupMissingFromIntegrity()">
+            🗑️ Remove Missing Files
+        </button>
+    </div>
+
+    <div id="integrityResults"></div>
+</div>
+
+<div class="card">
     <h2 class="card-title">🤖 AI Auto-Tagging - Phase 2</h2>
 
     <p style="color: var(--text-secondary); margin-bottom: 1rem;">
@@ -115,6 +137,26 @@
         Already tagged images are skipped. Tags are added immediately - no review needed!
         First-time use will download the AI model (may take a few minutes).
     </p>
+</div>
+
+<div class="card">
+    <h2 class="card-title">📋 Duplicate Detection</h2>
+
+    <p style="color: var(--text-secondary); margin-bottom: 1rem;">
+        Find true duplicate images by file content (checksum), even if filenames differ.
+        Checksums must be computed first, then duplicates can be detected.
+    </p>
+
+    <div style="display: flex; gap: 1rem; flex-wrap: wrap; margin-bottom: 1rem;">
+        <button class="btn btn-secondary" onclick="computeChecksums()" id="checksumBtn">
+            🔢 Compute Checksums
+        </button>
+        <button class="btn btn-primary" onclick="findDuplicates()">
+            🔍 Find Duplicates
+        </button>
+    </div>
+
+    <div id="duplicateResults"></div>
 </div>
 
 <div class="card">
@@ -569,11 +611,432 @@ async function triggerAutoTag() {
     }
 }
 
+// File Integrity Management Functions
+async function runIntegrityScan() {
+    const resultsDiv = document.getElementById('integrityResults');
+    resultsDiv.innerHTML = '<div class="loading">Scanning database integrity...</div>';
+
+    try {
+        const response = await fetch('/api/integrity/scan', { method: 'POST' });
+        const data = await response.json();
+
+        if (!data.success) {
+            resultsDiv.innerHTML = `
+                <div style="padding: 1rem; background: #fef2f2; border-radius: 6px; color: #dc2626;">
+                    Error: ${data.error}
+                </div>
+            `;
+            return;
+        }
+
+        const results = data.results;
+        let html = '<div style="margin-top: 1rem;">';
+
+        // Summary
+        html += `
+            <div style="background: var(--card-bg); border: 1px solid var(--border-color); border-radius: 8px; padding: 1rem; margin-bottom: 1rem;">
+                <h3 style="margin-top: 0; font-size: 1rem;">Scan Summary</h3>
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem; font-size: 0.875rem;">
+                    <div><strong>Total Checked:</strong> ${results.total_checked}</div>
+                    <div><strong>Valid Files:</strong> ${results.valid_files}</div>
+                    <div style="color: ${results.missing_files.length > 0 ? 'var(--danger-color)' : 'var(--success-color)'};">
+                        <strong>Missing:</strong> ${results.missing_files.length}
+                    </div>
+                    <div style="color: ${results.corrupted_files.length > 0 ? 'var(--warning-color)' : 'var(--success-color)'};">
+                        <strong>Corrupted:</strong> ${results.corrupted_files.length}
+                    </div>
+                </div>
+            </div>
+        `;
+
+        // Missing files
+        if (results.missing_files.length > 0) {
+            html += `
+                <div style="background: #fef2f2; border: 1px solid #dc2626; border-radius: 8px; padding: 1rem; margin-bottom: 1rem;">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
+                        <h3 style="margin: 0; font-size: 1rem; color: #dc2626;">⚠️ Missing Files (${results.missing_files.length})</h3>
+                        <button class="btn btn-secondary" onclick="cleanupMissingFromIntegrity()" style="padding: 0.5rem 1rem; font-size: 0.875rem;">
+                            Remove All from Database
+                        </button>
+                    </div>
+                    <ul style="list-style: none; padding: 0; margin: 0.5rem 0 0 0; max-height: 200px; overflow-y: auto;">
+                        ${results.missing_files.slice(0, 20).map(f => `
+                            <li style="padding: 0.25rem 0; font-size: 0.875rem; font-family: monospace;">${f.filepath}</li>
+                        `).join('')}
+                        ${results.missing_files.length > 20 ? `<li style="padding: 0.5rem 0; color: var(--text-secondary);">... and ${results.missing_files.length - 20} more</li>` : ''}
+                    </ul>
+                </div>
+            `;
+        }
+
+        // Corrupted files
+        if (results.corrupted_files.length > 0) {
+            html += `
+                <div style="background: #fffbeb; border: 1px solid #f59e0b; border-radius: 8px; padding: 1rem; margin-bottom: 1rem;">
+                    <h3 style="margin: 0 0 0.5rem 0; font-size: 1rem; color: #f59e0b;">🔧 Corrupted Files (${results.corrupted_files.length})</h3>
+                    <p style="font-size: 0.875rem; color: var(--text-secondary); margin-bottom: 1rem;">
+                        These files exist but cannot be opened properly. Choose an action for each file.
+                    </p>
+                    <div id="corruptedFilesList" style="max-height: 400px; overflow-y: auto;">
+                        ${results.corrupted_files.map(f => `
+                            <div style="background: white; border: 1px solid #e5e7eb; border-radius: 6px; padding: 0.75rem; margin-bottom: 0.5rem;">
+                                <div style="font-family: monospace; font-size: 0.875rem; margin-bottom: 0.5rem;">
+                                    <strong>${f.filename}</strong>
+                                </div>
+                                <div style="font-size: 0.75rem; color: var(--text-secondary); margin-bottom: 0.5rem;">
+                                    Path: ${f.filepath}<br>
+                                    Error: ${f.error}
+                                </div>
+                                <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
+                                    <button class="btn btn-secondary" onclick="handleCorrupted(${f.id}, 'skip')" style="padding: 0.25rem 0.75rem; font-size: 0.75rem;">
+                                        ⏭️ Skip
+                                    </button>
+                                    <button class="btn btn-secondary" onclick="handleCorrupted(${f.id}, 'delete')" style="padding: 0.25rem 0.75rem; font-size: 0.75rem;">
+                                        🗑️ Delete File
+                                    </button>
+                                    <button class="btn btn-secondary" onclick="handleCorrupted(${f.id}, 'quarantine')" style="padding: 0.25rem 0.75rem; font-size: 0.75rem;">
+                                        📦 Move to Quarantine
+                                    </button>
+                                </div>
+                            </div>
+                        `).join('')}
+                    </div>
+                </div>
+            `;
+        }
+
+        // All clear
+        if (results.missing_files.length === 0 && results.corrupted_files.length === 0) {
+            html += `
+                <div style="padding: 1rem; background: #f0fdf4; border-radius: 6px; color: #10b981;">
+                    ✓ All files are present and valid!
+                </div>
+            `;
+        }
+
+        html += '</div>';
+        resultsDiv.innerHTML = html;
+
+    } catch (error) {
+        resultsDiv.innerHTML = `
+            <div style="padding: 1rem; background: #fef2f2; border-radius: 6px; color: #dc2626;">
+                Error: ${error.message}
+            </div>
+        `;
+    }
+}
+
+async function scanForNewFiles() {
+    const resultsDiv = document.getElementById('integrityResults');
+    resultsDiv.innerHTML = '<div class="loading">Scanning for new files...</div>';
+
+    try {
+        const response = await fetch('/api/integrity/scan-new', { method: 'POST' });
+        const data = await response.json();
+
+        if (!data.success) {
+            resultsDiv.innerHTML = `
+                <div style="padding: 1rem; background: #fef2f2; border-radius: 6px; color: #dc2626;">
+                    Error: ${data.error}
+                </div>
+            `;
+            return;
+        }
+
+        if (data.total_found === 0) {
+            resultsDiv.innerHTML = `
+                <div style="padding: 1rem; background: #f0fdf4; border-radius: 6px; color: #10b981;">
+                    ✓ No new files found. Database is up to date!
+                </div>
+            `;
+            return;
+        }
+
+        // Separate valid and invalid files
+        const validFiles = data.new_files.filter(f => f.valid);
+        const invalidFiles = data.new_files.filter(f => !f.valid);
+
+        let html = '<div style="margin-top: 1rem;">';
+
+        // Valid files
+        if (validFiles.length > 0) {
+            html += `
+                <div style="background: #f0fdf4; border: 1px solid #10b981; border-radius: 8px; padding: 1rem; margin-bottom: 1rem;">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
+                        <h3 style="margin: 0; font-size: 1rem; color: #10b981;">✓ Valid New Files (${validFiles.length})</h3>
+                        <button class="btn btn-primary" onclick="addAllValidFiles()" style="padding: 0.5rem 1rem; font-size: 0.875rem;">
+                            ➕ Add All to Database
+                        </button>
+                    </div>
+                    <ul style="list-style: none; padding: 0; margin: 0.5rem 0 0 0; max-height: 200px; overflow-y: auto;">
+                        ${validFiles.slice(0, 20).map(f => `
+                            <li style="padding: 0.25rem 0; font-size: 0.875rem;">
+                                <span style="font-family: monospace;">${f.filename}</span>
+                                <span style="color: var(--text-secondary); font-size: 0.75rem; margin-left: 0.5rem;">
+                                    ${(f.file_size / 1024).toFixed(1)} KB
+                                </span>
+                            </li>
+                        `).join('')}
+                        ${validFiles.length > 20 ? `<li style="padding: 0.5rem 0; color: var(--text-secondary);">... and ${validFiles.length - 20} more</li>` : ''}
+                    </ul>
+                </div>
+            `;
+        }
+
+        // Invalid files
+        if (invalidFiles.length > 0) {
+            html += `
+                <div style="background: #fef2f2; border: 1px solid #dc2626; border-radius: 8px; padding: 1rem; margin-bottom: 1rem;">
+                    <h3 style="margin: 0 0 0.5rem 0; font-size: 1rem; color: #dc2626;">⚠️ Invalid/Corrupted New Files (${invalidFiles.length})</h3>
+                    <p style="font-size: 0.875rem; color: var(--text-secondary); margin-bottom: 1rem;">
+                        These files were found but appear to be corrupted or invalid.
+                    </p>
+                    <ul style="list-style: none; padding: 0; margin: 0; max-height: 200px; overflow-y: auto;">
+                        ${invalidFiles.slice(0, 10).map(f => `
+                            <li style="padding: 0.5rem; background: white; border: 1px solid #e5e7eb; border-radius: 4px; margin-bottom: 0.5rem;">
+                                <div style="font-family: monospace; font-size: 0.875rem;">${f.filename}</div>
+                                <div style="font-size: 0.75rem; color: #dc2626; margin-top: 0.25rem;">${f.error}</div>
+                            </li>
+                        `).join('')}
+                        ${invalidFiles.length > 10 ? `<li style="padding: 0.5rem 0; color: var(--text-secondary);">... and ${invalidFiles.length - 10} more</li>` : ''}
+                    </ul>
+                </div>
+            `;
+        }
+
+        html += '</div>';
+
+        // Store valid files for batch add
+        window.validFilesToAdd = validFiles.map(f => f.filepath);
+
+        resultsDiv.innerHTML = html;
+
+    } catch (error) {
+        resultsDiv.innerHTML = `
+            <div style="padding: 1rem; background: #fef2f2; border-radius: 6px; color: #dc2626;">
+                Error: ${error.message}
+            </div>
+        `;
+    }
+}
+
+async function addAllValidFiles() {
+    if (!window.validFilesToAdd || window.validFilesToAdd.length === 0) {
+        alert('No files to add');
+        return;
+    }
+
+    if (!confirm(`Add ${window.validFilesToAdd.length} file(s) to the database?`)) {
+        return;
+    }
+
+    const resultsDiv = document.getElementById('integrityResults');
+    resultsDiv.innerHTML = `<div class="loading">Adding ${window.validFilesToAdd.length} files to database...</div>`;
+
+    try {
+        const response = await fetch('/api/integrity/batch-add-files', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                filepaths: window.validFilesToAdd,
+                auto_thumbnail: true
+            })
+        });
+
+        const data = await response.json();
+
+        if (data.success) {
+            resultsDiv.innerHTML = `
+                <div style="padding: 1rem; background: #f0fdf4; border-radius: 6px; color: #10b981;">
+                    ✓ Added ${data.added} file(s) to database
+                    ${data.failed > 0 ? `<br><span style="color: #dc2626;">Failed: ${data.failed}</span>` : ''}
+                </div>
+            `;
+        } else {
+            resultsDiv.innerHTML = `
+                <div style="padding: 1rem; background: #fef2f2; border-radius: 6px; color: #dc2626;">
+                    Error: ${data.error}
+                </div>
+            `;
+        }
+    } catch (error) {
+        resultsDiv.innerHTML = `
+            <div style="padding: 1rem; background: #fef2f2; border-radius: 6px; color: #dc2626;">
+                Error: ${error.message}
+            </div>
+        `;
+    }
+}
+
+async function cleanupMissingFromIntegrity() {
+    if (!confirm('Remove all missing files from the database? This cannot be undone.')) {
+        return;
+    }
+
+    const resultsDiv = document.getElementById('integrityResults');
+    resultsDiv.innerHTML = '<div class="loading">Removing missing files...</div>';
+
+    try {
+        const response = await fetch('/api/integrity/cleanup-missing', { method: 'POST' });
+        const data = await response.json();
+
+        if (data.success) {
+            resultsDiv.innerHTML = `
+                <div style="padding: 1rem; background: #f0fdf4; border-radius: 6px; color: #10b981;">
+                    ✓ Removed ${data.removed_count} missing file(s) from database
+                </div>
+            `;
+        } else {
+            resultsDiv.innerHTML = `
+                <div style="padding: 1rem; background: #fef2f2; border-radius: 6px; color: #dc2626;">
+                    Error: ${data.error}
+                </div>
+            `;
+        }
+    } catch (error) {
+        resultsDiv.innerHTML = `
+            <div style="padding: 1rem; background: #fef2f2; border-radius: 6px; color: #dc2626;">
+                Error: ${error.message}
+            </div>
+        `;
+    }
+}
+
+async function handleCorrupted(imageId, action) {
+    let quarantineFolder = null;
+
+    if (action === 'quarantine') {
+        quarantineFolder = prompt('Enter quarantine folder path:', '/home/walter/dev/FileCat/quarantine');
+        if (!quarantineFolder) {
+            return; // User cancelled
+        }
+    }
+
+    if (action === 'delete' && !confirm('Delete this file permanently? This cannot be undone.')) {
+        return;
+    }
+
+    try {
+        const response = await fetch(`/api/integrity/handle-corrupted/${imageId}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action, quarantine_folder: quarantineFolder })
+        });
+
+        const data = await response.json();
+
+        if (data.success) {
+            alert(data.message);
+            // Re-run the scan to refresh the list
+            runIntegrityScan();
+        } else {
+            alert('Error: ' + data.message);
+        }
+    } catch (error) {
+        alert('Error: ' + error.message);
+    }
+}
+
 // Load auto-tag status on page load and refresh every 10 seconds
 document.addEventListener('DOMContentLoaded', () => {
     loadAutoTagStatus();
     autoTagStatusInterval = setInterval(loadAutoTagStatus, 10000);
 });
+
+// Duplicate Detection
+async function computeChecksums() {
+    const resultsDiv = document.getElementById('duplicateResults');
+    const btn = document.getElementById('checksumBtn');
+    btn.disabled = true;
+    btn.textContent = '⏳ Computing...';
+    resultsDiv.innerHTML = '<div class="loading">Computing file checksums (this may take a while for large collections)...</div>';
+
+    try {
+        const response = await fetch('/api/duplicates/compute-checksums', { method: 'POST' });
+        const data = await response.json();
+
+        if (!data.success) {
+            resultsDiv.innerHTML = `<div style="padding: 1rem; background: #fef2f2; border-radius: 6px; color: #dc2626;">Error: ${data.error}</div>`;
+            return;
+        }
+
+        resultsDiv.innerHTML = `
+            <div style="padding: 1rem; background: #f0fdf4; border-radius: 6px; color: #10b981;">
+                ✓ Checksums computed for ${data.computed} image(s)
+                ${data.errors > 0 ? `<br><span style="color: #dc2626;">Errors: ${data.errors} (missing files)</span>` : ''}
+                <br><small>Click "Find Duplicates" to see results.</small>
+            </div>
+        `;
+    } catch (error) {
+        resultsDiv.innerHTML = `<div style="padding: 1rem; background: #fef2f2; border-radius: 6px; color: #dc2626;">Error: ${error.message}</div>`;
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '🔢 Compute Checksums';
+    }
+}
+
+async function findDuplicates() {
+    const resultsDiv = document.getElementById('duplicateResults');
+    resultsDiv.innerHTML = '<div class="loading">Scanning for duplicates...</div>';
+
+    try {
+        const response = await fetch('/api/duplicates');
+        const data = await response.json();
+
+        if (!data.success) {
+            resultsDiv.innerHTML = `<div style="padding: 1rem; background: #fef2f2; border-radius: 6px; color: #dc2626;">Error: ${data.error}</div>`;
+            return;
+        }
+
+        let html = '';
+
+        if (data.missing_checksums > 0) {
+            html += `<div style="padding: 0.75rem; background: #fffbeb; border: 1px solid #f59e0b; border-radius: 6px; color: #92400e; margin-bottom: 1rem;">
+                ⚠️ ${data.missing_checksums} image(s) don't have checksums yet. Click "Compute Checksums" first for complete results.
+            </div>`;
+        }
+
+        if (data.total_groups === 0) {
+            html += `<div style="padding: 1rem; background: #f0fdf4; border-radius: 6px; color: #10b981;">✓ No duplicate images found!</div>`;
+            resultsDiv.innerHTML = html;
+            return;
+        }
+
+        html += `
+            <div style="background: var(--card-bg); border: 1px solid var(--border-color); border-radius: 8px; padding: 1rem; margin-bottom: 1rem;">
+                <strong>Found ${data.total_groups} group(s)</strong> of identical files
+                (${data.total_duplicates} extra copies total)
+            </div>
+            <div style="max-height: 600px; overflow-y: auto;">
+        `;
+
+        for (const group of data.groups) {
+            const sizeKB = group.file_size ? (group.file_size / 1024).toFixed(1) : '?';
+            html += `
+                <div style="background: var(--card-bg); border: 1px solid var(--border-color); border-radius: 8px; padding: 1rem; margin-bottom: 0.75rem;">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
+                        <strong>${group.count} identical copies</strong>
+                        <span style="color: var(--text-secondary); font-size: 0.875rem;">${sizeKB} KB · md5:${group.checksum.substring(0, 8)}…</span>
+                    </div>
+                    <ul style="list-style: none; padding: 0; margin: 0;">
+                        ${group.files.map((f, i) => `
+                            <li style="padding: 0.35rem 0; font-size: 0.85rem; font-family: monospace; color: var(--text-secondary); display: flex; justify-content: space-between; align-items: center;">
+                                <span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1;" title="${f.filepath}">${f.filepath}</span>
+                                ${i > 0 ? `<button class="btn btn-secondary" onclick="if(confirm('Remove this duplicate entry from database?')) fetch('/api/images/${f.id}',{method:'DELETE'}).then(()=>findDuplicates())" style="padding: 0.2rem 0.5rem; font-size: 0.7rem; margin-left: 0.5rem; flex-shrink: 0;">🗑️</button>` : '<span style="font-size: 0.7rem; color: var(--success-color); margin-left: 0.5rem; flex-shrink: 0;">keep</span>'}
+                            </li>
+                        `).join('')}
+                    </ul>
+                </div>
+            `;
+        }
+
+        html += '</div>';
+        resultsDiv.innerHTML = html;
+
+    } catch (error) {
+        resultsDiv.innerHTML = `<div style="padding: 1rem; background: #fef2f2; border-radius: 6px; color: #dc2626;">Error: ${error.message}</div>`;
+    }
+}
 
 // Cleanup interval when page unloads
 window.addEventListener('beforeunload', () => {

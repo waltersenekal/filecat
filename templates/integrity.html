@@ -1,0 +1,497 @@
+{% extends "base.html" %}
+
+{% block title %}File Integrity - FileCat{% endblock %}
+
+{% block content %}
+<div class="container-fluid mt-4">
+    <h1 class="mb-4">
+        <i class="fas fa-shield-alt"></i> File Integrity Management
+    </h1>
+
+    <!-- Stats Overview -->
+    <div class="row mb-4">
+        <div class="col-md-3">
+            <div class="card text-white bg-success">
+                <div class="card-body">
+                    <h5 class="card-title">Valid Files</h5>
+                    <h2 id="stat-valid">-</h2>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card text-white bg-warning">
+                <div class="card-body">
+                    <h5 class="card-title">Unchecked</h5>
+                    <h2 id="stat-unchecked">-</h2>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card text-white bg-danger">
+                <div class="card-body">
+                    <h5 class="card-title">Missing Files</h5>
+                    <h2 id="stat-missing">-</h2>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card text-white bg-danger">
+                <div class="card-body">
+                    <h5 class="card-title">Corrupted Files</h5>
+                    <h2 id="stat-corrupted">-</h2>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Action Buttons -->
+    <div class="card mb-4">
+        <div class="card-header">
+            <h5><i class="fas fa-tools"></i> Integrity Actions</h5>
+        </div>
+        <div class="card-body">
+            <div class="btn-group mb-3" role="group">
+                <button class="btn btn-primary" onclick="scanIntegrity()">
+                    <i class="fas fa-search"></i> Scan All Files
+                </button>
+                <button class="btn btn-info" onclick="scanNewFiles()">
+                    <i class="fas fa-file-import"></i> Find New Files
+                </button>
+                <button class="btn btn-warning" onclick="cleanupMissing()">
+                    <i class="fas fa-trash"></i> Remove Missing Files from DB
+                </button>
+            </div>
+
+            <div id="scan-progress" class="progress mb-3" style="display: none;">
+                <div class="progress-bar progress-bar-striped progress-bar-animated"
+                     role="progressbar" style="width: 100%">
+                    Scanning...
+                </div>
+            </div>
+
+            <div id="action-result" class="alert" style="display: none;"></div>
+        </div>
+    </div>
+
+    <!-- Issues List -->
+    <div class="card">
+        <div class="card-header d-flex justify-content-between align-items-center">
+            <h5><i class="fas fa-exclamation-triangle"></i> Files with Issues</h5>
+            <button class="btn btn-sm btn-secondary" onclick="refreshIssues()">
+                <i class="fas fa-sync"></i> Refresh
+            </button>
+        </div>
+        <div class="card-body">
+            <div id="issues-loading" class="text-center py-5">
+                <div class="spinner-border" role="status">
+                    <span class="visually-hidden">Loading...</span>
+                </div>
+                <p class="mt-2">Loading issues...</p>
+            </div>
+
+            <div id="issues-empty" style="display: none;" class="alert alert-success">
+                <i class="fas fa-check-circle"></i> No integrity issues found! All files are valid.
+            </div>
+
+            <div id="issues-list" style="display: none;">
+                <table class="table table-striped">
+                    <thead>
+                        <tr>
+                            <th>Status</th>
+                            <th>File</th>
+                            <th>Path</th>
+                            <th>Error</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="issues-tbody">
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <!-- New Files List -->
+    <div id="new-files-card" class="card mt-4" style="display: none;">
+        <div class="card-header">
+            <h5><i class="fas fa-file-medical"></i> New Files Found</h5>
+        </div>
+        <div class="card-body">
+            <div id="new-files-list">
+                <table class="table table-striped">
+                    <thead>
+                        <tr>
+                            <th>Status</th>
+                            <th>File</th>
+                            <th>Size</th>
+                            <th>Dimensions</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="new-files-tbody">
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Quarantine Modal -->
+<div class="modal fade" id="quarantineModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Move to Quarantine</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <p>Move this file to quarantine folder?</p>
+                <div class="mb-3">
+                    <label class="form-label">Quarantine Folder:</label>
+                    <input type="text" class="form-control" id="quarantine-folder"
+                           value="{{ config.SOURCE_FOLDER }}/../quarantine" placeholder="/path/to/quarantine">
+                </div>
+                <div id="quarantine-filename" class="alert alert-info"></div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-warning" onclick="executeQuarantine()">
+                    <i class="fas fa-box"></i> Move to Quarantine
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+let currentQuarantineImageId = null;
+const quarantineModal = new bootstrap.Modal(document.getElementById('quarantineModal'));
+
+// Load issues on page load
+document.addEventListener('DOMContentLoaded', () => {
+    refreshIssues();
+});
+
+async function refreshIssues() {
+    document.getElementById('issues-loading').style.display = 'block';
+    document.getElementById('issues-empty').style.display = 'none';
+    document.getElementById('issues-list').style.display = 'none';
+
+    try {
+        const response = await fetch('/api/integrity/issues');
+        const data = await response.json();
+
+        if (!data.success) {
+            throw new Error(data.error || 'Failed to load issues');
+        }
+
+        // Update stats
+        document.getElementById('stat-valid').textContent = data.stats.valid || 0;
+        document.getElementById('stat-unchecked').textContent = data.stats.unchecked || 0;
+        document.getElementById('stat-missing').textContent = data.stats.missing || 0;
+        document.getElementById('stat-corrupted').textContent = data.stats.corrupted || 0;
+
+        // Display issues
+        if (data.issues.length === 0) {
+            document.getElementById('issues-empty').style.display = 'block';
+        } else {
+            displayIssues(data.issues);
+            document.getElementById('issues-list').style.display = 'block';
+        }
+    } catch (error) {
+        console.error('Error loading issues:', error);
+        showResult('Error loading issues: ' + error.message, 'danger');
+    } finally {
+        document.getElementById('issues-loading').style.display = 'none';
+    }
+}
+
+function displayIssues(issues) {
+    const tbody = document.getElementById('issues-tbody');
+    tbody.innerHTML = '';
+
+    issues.forEach(issue => {
+        const row = document.createElement('tr');
+
+        const statusBadge = issue.integrity_status === 'missing'
+            ? '<span class="badge bg-danger">Missing</span>'
+            : '<span class="badge bg-warning">Corrupted</span>';
+
+        row.innerHTML = `
+            <td>${statusBadge}</td>
+            <td><strong>${escapeHtml(issue.filename)}</strong></td>
+            <td><small>${escapeHtml(issue.filepath)}</small></td>
+            <td><small class="text-danger">${escapeHtml(issue.integrity_error || 'Unknown error')}</small></td>
+            <td>
+                <div class="btn-group btn-group-sm">
+                    ${issue.integrity_status === 'missing'
+                        ? `<button class="btn btn-danger" onclick="deleteFromDB(${issue.id})">
+                            <i class="fas fa-trash"></i> Remove from DB
+                           </button>`
+                        : `<button class="btn btn-warning" onclick="showQuarantine(${issue.id}, '${escapeHtml(issue.filename)}')">
+                            <i class="fas fa-box"></i> Quarantine
+                           </button>
+                           <button class="btn btn-danger" onclick="deleteFile(${issue.id})">
+                            <i class="fas fa-trash"></i> Delete
+                           </button>`
+                    }
+                </div>
+            </td>
+        `;
+
+        tbody.appendChild(row);
+    });
+}
+
+async function scanIntegrity() {
+    const progressBar = document.getElementById('scan-progress');
+    progressBar.style.display = 'block';
+    showResult('Scanning all files for integrity issues...', 'info');
+
+    try {
+        const response = await fetch('/api/integrity/scan', { method: 'POST' });
+        const data = await response.json();
+
+        if (!data.success) {
+            throw new Error(data.error || 'Scan failed');
+        }
+
+        const results = data.results;
+        showResult(
+            `Scan complete! Checked ${results.total_checked} files. ` +
+            `Valid: ${results.valid_files}, Missing: ${results.missing_count}, Corrupted: ${results.corrupted_count}`,
+            results.missing_count + results.corrupted_count > 0 ? 'warning' : 'success'
+        );
+
+        refreshIssues();
+    } catch (error) {
+        showResult('Error during scan: ' + error.message, 'danger');
+    } finally {
+        progressBar.style.display = 'none';
+    }
+}
+
+async function cleanupMissing() {
+    if (!confirm('Remove all missing files from database? This cannot be undone.')) {
+        return;
+    }
+
+    try {
+        const response = await fetch('/api/integrity/cleanup-missing', { method: 'POST' });
+        const data = await response.json();
+
+        if (!data.success) {
+            throw new Error(data.error || 'Cleanup failed');
+        }
+
+        showResult(`Removed ${data.removed_count} missing file(s) from database`, 'success');
+        refreshIssues();
+    } catch (error) {
+        showResult('Error during cleanup: ' + error.message, 'danger');
+    }
+}
+
+async function scanNewFiles() {
+    const progressBar = document.getElementById('scan-progress');
+    progressBar.style.display = 'block';
+    showResult('Scanning for new files...', 'info');
+
+    try {
+        const response = await fetch('/api/integrity/scan-new-files', { method: 'POST' });
+        const data = await response.json();
+
+        if (!data.success) {
+            throw new Error(data.error || 'Scan failed');
+        }
+
+        if (data.total_found === 0) {
+            showResult('No new files found', 'info');
+            document.getElementById('new-files-card').style.display = 'none';
+        } else {
+            showResult(`Found ${data.total_found} new file(s)`, 'success');
+            displayNewFiles(data.new_files);
+            document.getElementById('new-files-card').style.display = 'block';
+        }
+    } catch (error) {
+        showResult('Error scanning: ' + error.message, 'danger');
+    } finally {
+        progressBar.style.display = 'none';
+    }
+}
+
+function displayNewFiles(files) {
+    const tbody = document.getElementById('new-files-tbody');
+    tbody.innerHTML = '';
+
+    files.forEach(file => {
+        const row = document.createElement('tr');
+
+        const statusBadge = file.valid
+            ? '<span class="badge bg-success">Valid</span>'
+            : '<span class="badge bg-danger">Invalid</span>';
+
+        const dimensions = file.dimensions
+            ? `${file.dimensions[0]} x ${file.dimensions[1]}`
+            : 'N/A';
+
+        row.innerHTML = `
+            <td>${statusBadge}</td>
+            <td><strong>${escapeHtml(file.filename)}</strong><br><small>${escapeHtml(file.filepath)}</small></td>
+            <td>${formatFileSize(file.file_size)}</td>
+            <td>${dimensions}</td>
+            <td>
+                ${file.valid
+                    ? `<button class="btn btn-sm btn-success" onclick="addNewFile('${escapeHtml(file.filepath)}')">
+                        <i class="fas fa-plus"></i> Add to Database
+                       </button>`
+                    : `<small class="text-danger">${escapeHtml(file.error)}</small>`
+                }
+            </td>
+        `;
+
+        tbody.appendChild(row);
+    });
+}
+
+async function addNewFile(filepath) {
+    try {
+        const response = await fetch('/api/integrity/add-new-file', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ filepath })
+        });
+
+        const data = await response.json();
+
+        if (!data.success) {
+            throw new Error(data.error || 'Failed to add file');
+        }
+
+        showResult(`Added: ${filepath}`, 'success');
+        scanNewFiles(); // Refresh list
+    } catch (error) {
+        showResult('Error adding file: ' + error.message, 'danger');
+    }
+}
+
+function showQuarantine(imageId, filename) {
+    currentQuarantineImageId = imageId;
+    document.getElementById('quarantine-filename').textContent = `File: ${filename}`;
+    quarantineModal.show();
+}
+
+async function executeQuarantine() {
+    const quarantineFolder = document.getElementById('quarantine-folder').value;
+
+    if (!quarantineFolder) {
+        alert('Please specify a quarantine folder');
+        return;
+    }
+
+    try {
+        const response = await fetch('/api/integrity/handle-corrupted', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                image_id: currentQuarantineImageId,
+                action: 'quarantine',
+                quarantine_folder: quarantineFolder
+            })
+        });
+
+        const data = await response.json();
+
+        if (!data.success) {
+            throw new Error(data.message || 'Quarantine failed');
+        }
+
+        quarantineModal.hide();
+        showResult(data.message, 'success');
+        refreshIssues();
+    } catch (error) {
+        showResult('Error: ' + error.message, 'danger');
+    }
+}
+
+async function deleteFile(imageId) {
+    if (!confirm('Delete this corrupted file permanently? This cannot be undone.')) {
+        return;
+    }
+
+    try {
+        const response = await fetch('/api/integrity/handle-corrupted', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                image_id: imageId,
+                action: 'delete'
+            })
+        });
+
+        const data = await response.json();
+
+        if (!data.success) {
+            throw new Error(data.message || 'Delete failed');
+        }
+
+        showResult(data.message, 'success');
+        refreshIssues();
+    } catch (error) {
+        showResult('Error: ' + error.message, 'danger');
+    }
+}
+
+async function deleteFromDB(imageId) {
+    if (!confirm('Remove this file from database? The file is already missing.')) {
+        return;
+    }
+
+    try {
+        const response = await fetch('/api/integrity/handle-corrupted', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                image_id: imageId,
+                action: 'delete'  // This will just remove from DB since file is missing
+            })
+        });
+
+        const data = await response.json();
+
+        if (!data.success) {
+            throw new Error(data.message || 'Delete failed');
+        }
+
+        showResult(data.message, 'success');
+        refreshIssues();
+    } catch (error) {
+        showResult('Error: ' + error.message, 'danger');
+    }
+}
+
+function showResult(message, type) {
+    const resultDiv = document.getElementById('action-result');
+    resultDiv.className = `alert alert-${type}`;
+    resultDiv.textContent = message;
+    resultDiv.style.display = 'block';
+
+    setTimeout(() => {
+        resultDiv.style.display = 'none';
+    }, 5000);
+}
+
+function formatFileSize(bytes) {
+    if (bytes === 0) return '0 B';
+    const k = 1024;
+    const sizes = ['B', 'KB', 'MB', 'GB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return Math.round((bytes / Math.pow(k, i)) * 100) / 100 + ' ' + sizes[i];
+}
+
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+</script>
+{% endblock %}

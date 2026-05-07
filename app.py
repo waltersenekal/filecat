@@ -21,7 +21,19 @@ from config import *
 from database import *
 from scanner import scan_folder, check_missing_files, get_scan_summary
 from thumbnail_generator import generate_thumbnail, regenerate_all_thumbnails
-from ai_tagger import analyze_image, analyze_image_batch, suggest_tags_for_maintenance
+try:
+    from ai_tagger import analyze_image, analyze_image_batch, suggest_tags_for_maintenance
+    AI_TAGGER_AVAILABLE = True
+except Exception as e:
+    print(f"[WARNING] AI tagger not available: {e}")
+    AI_TAGGER_AVAILABLE = False
+    def analyze_image(*args, **kwargs): return []
+    def analyze_image_batch(*args, **kwargs): return []
+    def suggest_tags_for_maintenance(*args, **kwargs): return []
+from file_integrity import (
+    scan_database_integrity, cleanup_missing_files, check_file_integrity,
+    handle_corrupted_file, scan_for_new_files, add_new_file
+)
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = SECRET_KEY
@@ -65,6 +77,10 @@ def auto_tag_background_task():
     while not auto_tag_stop_event.is_set():
         try:
             if AUTO_TAG_ENABLED:
+                if not AI_TAGGER_AVAILABLE:
+                    print("[AUTO-TAG] AI tagger not available (STAG dependencies missing). Disabling auto-tag.")
+                    break
+
                 auto_tag_stats['is_running'] = True
                 auto_tag_stats['last_run'] = datetime.now().isoformat()
 
@@ -86,9 +102,10 @@ def auto_tag_background_task():
                 while not auto_tag_stop_event.is_set():
                     batch_number += 1
 
-                    # Find untagged images
+                    # Find untagged images (that need AI tagging)
                     print(f"[AUTO-TAG] Step 2: Finding untagged images (batch #{batch_number})...")
-                    untagged = get_images_without_ai_suggestions()
+                    from database import get_untagged_images_for_ai
+                    untagged = get_untagged_images_for_ai()
 
                     # Limit to batch size
                     images_to_process = untagged[:AUTO_TAG_BATCH_SIZE]
@@ -108,26 +125,39 @@ def auto_tag_background_task():
                             print(f"[AUTO-TAG] Stop requested, exiting...")
                             break
 
+                        image_id = img['id']  # Set this first, before try block
+
                         try:
-                            image_id = img['id']
                             image_path = os.path.join(SOURCE_FOLDER, img['filepath'])
 
                             if not os.path.exists(image_path):
                                 print(f"[AUTO-TAG]   ⚠️ Skipping missing file: {img['filename']}")
+                                # Mark as processed even though file is missing
+                                save_ai_suggestions(image_id, [])
+                                auto_tag_stats['images_processed'] += 1
                                 continue
 
-                            print(f"[AUTO-TAG]   Processing {idx+1}/{len(images_to_process)}: {img['filename']}")
+                            print(f"[AUTO-TAG]   Processing {idx+1}/{len(images_to_process)}: {img['filename']}", flush=True)
 
                             # Get existing tags
                             existing_tags = get_image_tags(image_id)
                             existing_tag_names = [tag['tag_name'] for tag in existing_tags]
 
-                            # Analyze with AI
+                            # Analyze with AI - pass image_id for corruption tracking
                             suggestions = suggest_tags_for_maintenance(
                                 image_path,
                                 existing_tags=existing_tag_names,
-                                max_suggestions=10
+                                max_suggestions=10,
+                                image_id=image_id  # Pass ID for corruption tracking
                             )
+
+                            if suggestions is None:
+                                # Image is corrupted - marked in DB, skip it
+                                print(f"[AUTO-TAG]     ❌ Image corrupted (marked in database)")
+                                auto_tag_stats['errors'] += 1
+                                auto_tag_stats['images_processed'] += 1
+                                # Don't save AI suggestions - let integrity status handle it
+                                continue
 
                             if suggestions:
                                 # Auto-add tags
@@ -149,11 +179,27 @@ def auto_tag_background_task():
 
                                 print(f"[AUTO-TAG]     ✓ Added {tags_added} tags")
                             else:
-                                print(f"[AUTO-TAG]     ⚠️ No tags suggested")
+                                # No suggestions - save empty list to mark as processed
+                                save_ai_suggestions(image_id, [])
+                                auto_tag_stats['images_processed'] += 1
+                                print(f"[AUTO-TAG]     ⚠️ No tags suggested (marked as processed)")
 
                         except Exception as e:
+                            # Mark as processed even on error to prevent infinite retry
                             auto_tag_stats['errors'] += 1
                             print(f"[AUTO-TAG]     ❌ Error processing {img['filename']}: {e}")
+
+                            try:
+                                # CRITICAL: Always mark as processed to avoid infinite loop
+                                save_ai_suggestions(image_id, [])
+                                auto_tag_stats['images_processed'] += 1
+                                print(f"[AUTO-TAG]     ✓ Marked as processed to prevent retry loop")
+                            except Exception as save_error:
+                                # This is BAD - we couldn't save the error marker
+                                print(f"[AUTO-TAG]     ❌❌ CRITICAL: Failed to mark as processed: {save_error}")
+                                print(f"[AUTO-TAG]     ❌❌ Image {image_id} ({img['filename']}) may loop forever!")
+                                import traceback
+                                traceback.print_exc()
 
                     total_processed_this_run += len(images_to_process)
                     total_tags_this_run += batch_tags_added
@@ -161,7 +207,7 @@ def auto_tag_background_task():
                     print(f"[AUTO-TAG] Batch #{batch_number} complete: {len(images_to_process)} images, {batch_tags_added} tags added")
 
                     # Check if there are more images to process
-                    remaining = get_images_without_ai_suggestions()
+                    remaining = get_untagged_images_for_ai()
                     if remaining:
                         print(f"[AUTO-TAG] 📋 {len(remaining)} images still to tag, starting next batch immediately...")
                         # No sleep - continue immediately to next batch
@@ -270,6 +316,18 @@ def favicon():
     )
 
 
+@app.route('/thumbnails/<path:filename>')
+def serve_thumbnail(filename):
+    """Serve thumbnail images"""
+    return send_from_directory(THUMBNAIL_FOLDER, filename)
+
+
+@app.route('/images/<path:filename>')
+def serve_image(filename):
+    """Serve original source images"""
+    return send_from_directory(SOURCE_FOLDER, filename)
+
+
 @app.route('/settings')
 def settings():
     """Settings page"""
@@ -285,6 +343,20 @@ def settings():
 def tags():
     """Tag management page"""
     return render_template('tags.html')
+
+
+@app.route('/browse')
+def browse():
+    """Browse folders page"""
+    return render_template('browse.html')
+
+
+@app.route('/integrity')
+def integrity():
+    """File integrity management page"""
+    return render_template('integrity.html', config={
+        'source_folder': SOURCE_FOLDER
+    })
 
 
 # API Endpoints
@@ -480,454 +552,133 @@ def api_delete_tag(tag_id):
     return jsonify({'success': success})
 
 
-@app.route('/api/tags/bulk-add', methods=['POST'])
-def api_bulk_add_tag():
-    """Add a tag to multiple images"""
-    data = request.json
-    image_ids = data.get('image_ids', [])
-    tag_name = data.get('tag_name', '')
-    added_count = bulk_add_tag_to_images(image_ids, tag_name)
-    return jsonify({'success': True, 'added_count': added_count})
-
-
 @app.route('/api/search')
-def api_search_images():
-    """Search images by tags, filename, or date range"""
-    query = request.args.get('q', '')
-    tags = request.args.get('tags', '')
-    filename = request.args.get('filename', '')
-    match_all = request.args.get('match_all', 'true').lower() == 'true'
-    date_from = request.args.get('date_from', '')
-    date_to = request.args.get('date_to', '')
-    
-    images = []
-    
-    if tags:
+def api_search():
+    """
+    Search images by tags, filename, and/or date range
+
+    Query parameters:
+    - tags: comma-separated tag names
+    - match_all: 'true' or 'false' (default: true) - whether to match all tags or any tag
+    - filename: search by filename (partial match)
+    - q: alias for filename
+    - date_from: start date (YYYY-MM-DD)
+    - date_to: end date (YYYY-MM-DD)
+    """
+    try:
+        tags_param = request.args.get('tags', '')
+        match_all = request.args.get('match_all', 'true').lower() == 'true'
+        filename = request.args.get('filename') or request.args.get('q', '')
+        date_from = request.args.get('date_from')
+        date_to = request.args.get('date_to')
+
+        results = []
+
         # Search by tags
-        tag_names = [t.strip().lower() for t in tags.split(',') if t.strip()]
-        images = search_images_by_tags(tag_names, match_all=match_all)
-    elif filename or query:
+        if tags_param:
+            tag_names = [t.strip().lower() for t in tags_param.split(',') if t.strip()]
+            if tag_names:
+                results = search_images_by_tags(tag_names, match_all=match_all)
+
         # Search by filename
-        search_query = filename or query
-        images = search_images_by_filename(search_query)
-    elif date_from or date_to:
+        elif filename:
+            results = search_images_by_filename(filename)
+
         # Search by date range
-        images = search_images_by_date_range(date_from, date_to)
-    else:
-        # No search criteria, return empty
-        images = []
-    
-    # If we have date range AND other criteria, filter the results
-    if (date_from or date_to) and (tags or filename or query):
-        date_filtered = search_images_by_date_range(date_from, date_to)
-        date_ids = {img['id'] for img in date_filtered}
-        images = [img for img in images if img['id'] in date_ids]
-    
-    # Add tags to each image
-    for img in images:
-        img['tags'] = get_image_tags(img['id'])
-    
-    return jsonify({
-        'images': images,
-        'total': len(images)
-    })
+        elif date_from or date_to:
+            results = search_images_by_date_range(date_from=date_from, date_to=date_to)
 
+        # Add tags to each result
+        for img in results:
+            img['tags'] = get_image_tags(img['id'])
 
-@app.route('/api/download', methods=['POST'])
-def api_download_images():
-    """Download selected images as ZIP"""
-    data = request.json
-    image_ids = data.get('image_ids', [])
-    
-    if not image_ids:
-        return jsonify({'error': 'No images selected'}), 400
-    
-    # Create ZIP file in memory
-    memory_file = io.BytesIO()
-    
-    with zipfile.ZipFile(memory_file, 'w', zipfile.ZIP_DEFLATED) as zf:
-        for image_id in image_ids:
-            image = get_image_by_id(image_id)
-            if image:
-                source_path = os.path.join(SOURCE_FOLDER, image['filepath'])
-                if os.path.exists(source_path):
-                    # Add file to ZIP with its relative path
-                    zf.write(source_path, image['filepath'])
-    
-    memory_file.seek(0)
-    
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    filename = f'filecat_download_{timestamp}.zip'
-    
-    return send_file(
-        memory_file,
-        mimetype='application/zip',
-        as_attachment=True,
-        download_name=filename
-    )
-
-
-@app.route('/images/<path:filepath>')
-def serve_image(filepath):
-    """Serve original image file"""
-    return send_from_directory(SOURCE_FOLDER, filepath)
-
-
-@app.route('/thumbnails/<path:filepath>')
-def serve_thumbnail(filepath):
-    """Serve thumbnail image"""
-    return send_from_directory(THUMBNAIL_FOLDER, filepath)
-
-
-@app.route('/api/thumbnails/regenerate', methods=['POST'])
-def api_regenerate_thumbnails():
-    """Regenerate all thumbnails with progress tracking"""
-    def run_regeneration():
-        def progress_callback(msg):
-            if msg.startswith("Progress:"):
-                parts = msg.split()
-                idx = int(parts[1].split('/')[0])
-                total = int(parts[1].split('/')[1])
-                progress_data['current'] = idx
-                progress_data['total'] = total
-            elif msg.startswith("File not found"):
-                progress_data['failed'] += 1
-        result = regenerate_all_thumbnails(progress_callback=progress_callback)
-        progress_data['done'] = True
-        progress_data['success'] = result.get('success', 0)
-        progress_data['failed'] = result.get('failed', 0)
-    
-    # Reset progress
-    progress_data.update({'current': 0, 'total': 1, 'done': False, 'success': 0, 'failed': 0})
-    thread = threading.Thread(target=run_regeneration)
-    thread.start()
-    return jsonify({'started': True})
-
-
-@app.route('/api/thumbnails/progress')
-def api_thumbnails_progress():
-    """Stream progress updates for thumbnail regeneration"""
-    def event_stream():
-        last_sent = -1
-        while not progress_data['done']:
-            if progress_data['current'] != last_sent:
-                yield f"data: {{\"current\": {progress_data['current']}, \"total\": {progress_data['total']}}}\n\n"
-                last_sent = progress_data['current']
-        # Send final result
-        yield f"data: {{\"current\": {progress_data['current']}, \"total\": {progress_data['total']}, \"done\": true, \"success\": {progress_data['success']}, \"failed\": {progress_data['failed']}}}\n\n"
-    return Response(event_stream(), mimetype='text/event-stream')
-
-
-@app.route('/api/database/backup', methods=['POST'])
-def api_backup_database():
-    """Backup the database"""
-    try:
-        backup_file = backup_database()
-        return jsonify({'success': True, 'backup_file': backup_file, 'message': 'Database backed up successfully'})
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-
-@app.route('/api/database/fix-tagged-status', methods=['POST'])
-def api_fix_tagged_status():
-    """Fix inconsistent is_tagged status"""
-    try:
-        fixed_count = fix_tagged_status()
         return jsonify({
-            'success': True, 
-            'fixed_count': fixed_count,
-            'message': f'Fixed {fixed_count} image(s) with inconsistent tag status'
+            'success': True,
+            'images': results,
+            'total': len(results)
         })
+
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
-@app.route('/api/settings/export')
-def api_export_settings():
-    """Export settings as JSON"""
-    settings_data = {
-        'source_folder': SOURCE_FOLDER,
-        'thumbnail_folder': THUMBNAIL_FOLDER,
-        'database_path': DATABASE_PATH,
-        'supported_extensions': list(SUPPORTED_EXTENSIONS),
-        'thumbnail_max_size': THUMBNAIL_MAX_SIZE,
-        'thumbnail_quality': THUMBNAIL_QUALITY,
-        'default_items_per_page': DEFAULT_ITEMS_PER_PAGE,
-        'items_per_page_options': ITEMS_PER_PAGE_OPTIONS,
-        'thumbnail_sizes': THUMBNAIL_SIZES,
-        'host': HOST,
-        'port': PORT,
-        'debug': DEBUG
-    }
-    
-    memory_file = io.BytesIO()
-    memory_file.write(json.dumps(settings_data, indent=2).encode('utf-8'))
-    memory_file.seek(0)
-    
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    filename = f'filecat_settings_{timestamp}.json'
-    
-    return send_file(
-        memory_file,
-        mimetype='application/json',
-        as_attachment=True,
-        download_name=filename
-    )
+@app.route('/api/browse')
+def api_browse():
+    """
+    Browse folder structure and get images in a specific folder
 
+    Query parameters:
+    - path: relative path from SOURCE_FOLDER (empty string for root)
+    """
+    try:
+        rel_path = request.args.get('path', '')
 
-@app.route('/api/export/csv', methods=['POST'])
-def api_export_csv():
-    """Export image metadata to CSV - Phase 2 Feature"""
-    data = request.json
-    image_ids = data.get('image_ids', [])
-    export_all = data.get('export_all', False)
+        # Build absolute path
+        if rel_path:
+            abs_path = os.path.join(SOURCE_FOLDER, rel_path)
+        else:
+            abs_path = SOURCE_FOLDER
 
-    # Get images
-    if export_all:
-        images = get_all_images(limit=None, offset=0)
-    else:
-        images = [get_image_by_id(img_id) for img_id in image_ids if get_image_by_id(img_id)]
+        # Security check: ensure path is within SOURCE_FOLDER
+        abs_path = os.path.abspath(abs_path)
+        source_folder_abs = os.path.abspath(SOURCE_FOLDER)
+        if not abs_path.startswith(source_folder_abs):
+            return jsonify({'error': 'Invalid path'}), 403
 
-    # Create CSV in memory
-    memory_file = io.StringIO()
-    writer = csv.writer(memory_file)
+        if not os.path.exists(abs_path) or not os.path.isdir(abs_path):
+            return jsonify({'error': 'Path not found'}), 404
 
-    # Write header
-    writer.writerow(['Filename', 'File Path', 'File Size (bytes)', 'Date Added', 'Date Modified', 'Tags', 'Is Tagged'])
+        # Get subfolders
+        folders = []
+        images_in_folder = []
 
-    # Write data
-    for img in images:
-        tags = get_image_tags(img['id'])
-        tag_names = ', '.join([tag['tag_name'] for tag in tags])
-
-        writer.writerow([
-            img['filename'],
-            img['filepath'],
-            img['file_size'],
-            img['date_added'],
-            img['date_modified'],
-            tag_names,
-            'Yes' if img['is_tagged'] else 'No'
-        ])
-
-    # Convert to bytes
-    memory_file.seek(0)
-    output = io.BytesIO()
-    output.write(memory_file.getvalue().encode('utf-8'))
-    output.seek(0)
-
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    filename = f'filecat_export_{timestamp}.csv'
-
-    return send_file(
-        output,
-        mimetype='text/csv',
-        as_attachment=True,
-        download_name=filename
-    )
-
-
-@app.route('/api/print/pdf', methods=['POST'])
-def api_generate_pdf():
-    """Generate PDF for printing images - Phase 2 Feature"""
-    data = request.json
-    image_ids = data.get('image_ids', [])
-    layout = data.get('layout', '1')  # 1, 2, 4, 6, 9 images per page
-    page_size = data.get('page_size', 'letter')  # letter or a4
-    orientation = data.get('orientation', 'portrait')  # portrait or landscape
-    include_info = data.get('include_info', True)  # Include filename and tags
-
-    if not image_ids:
-        return jsonify({'error': 'No images selected'}), 400
-
-    # Get page size
-    if page_size.lower() == 'a4':
-        pagesize = A4
-    else:
-        pagesize = letter
-
-    # Handle orientation
-    if orientation == 'landscape':
-        pagesize = (pagesize[1], pagesize[0])
-
-    # Create PDF in memory
-    memory_file = io.BytesIO()
-    c = canvas.Canvas(memory_file, pagesize=pagesize)
-    page_width, page_height = pagesize
-
-    # Define layout configurations
-    layout_configs = {
-        '1': {'cols': 1, 'rows': 1},
-        '2': {'cols': 1, 'rows': 2},
-        '4': {'cols': 2, 'rows': 2},
-        '6': {'cols': 2, 'rows': 3},
-        '9': {'cols': 3, 'rows': 3}
-    }
-
-    config = layout_configs.get(layout, {'cols': 1, 'rows': 1})
-    cols = config['cols']
-    rows = config['rows']
-    images_per_page = cols * rows
-
-    # Calculate cell dimensions
-    margin = 0.5 * inch
-    cell_width = (page_width - 2 * margin) / cols
-    cell_height = (page_height - 2 * margin) / rows
-
-    # Space for info text
-    info_height = 0.3 * inch if include_info else 0
-    available_height = cell_height - info_height
-
-    # Process images
-    images = []
-    for img_id in image_ids:
-        img = get_image_by_id(img_id)
-        if img:
-            images.append(img)
-
-    # Generate PDF
-    for page_start in range(0, len(images), images_per_page):
-        page_images = images[page_start:page_start + images_per_page]
-
-        for idx, img in enumerate(page_images):
-            row = idx // cols
-            col = idx % cols
-
-            x = margin + col * cell_width
-            y = page_height - margin - (row + 1) * cell_height
-
-            # Get image path
-            source_path = os.path.join(SOURCE_FOLDER, img['filepath'])
-
-            if os.path.exists(source_path):
-                try:
-                    # Draw image
-                    img_reader = ImageReader(source_path)
-                    img_width, img_height = img_reader.getSize()
-
-                    # Calculate scaling to fit in cell
-                    scale_w = (cell_width - 0.2 * inch) / img_width
-                    scale_h = available_height / img_height
-                    scale = min(scale_w, scale_h)
-
-                    scaled_w = img_width * scale
-                    scaled_h = img_height * scale
-
-                    # Center image in cell
-                    img_x = x + (cell_width - scaled_w) / 2
-                    img_y = y + info_height + (available_height - scaled_h) / 2
-
-                    c.drawImage(source_path, img_x, img_y, scaled_w, scaled_h, preserveAspectRatio=True)
-
-                    # Draw info if requested
-                    if include_info:
-                        tags = get_image_tags(img['id'])
-                        tag_names = ', '.join([tag['tag_name'] for tag in tags[:5]])  # Limit to 5 tags
-                        if len(tags) > 5:
-                            tag_names += '...'
-
-                        c.setFont("Helvetica", 8)
-                        c.drawString(x + 0.1 * inch, y + 0.15 * inch, img['filename'][:50])
-                        if tag_names:
-                            c.setFont("Helvetica-Oblique", 7)
-                            c.drawString(x + 0.1 * inch, y + 0.05 * inch, tag_names[:60])
-
-                except Exception as e:
-                    # Draw error placeholder
-                    c.setFont("Helvetica", 10)
-                    c.drawString(x + 0.1 * inch, y + cell_height / 2, f"Error loading: {img['filename']}")
-            else:
-                # Draw missing placeholder
-                c.setFont("Helvetica", 10)
-                c.drawString(x + 0.1 * inch, y + cell_height / 2, f"Missing: {img['filename']}")
-
-        c.showPage()
-
-    c.save()
-    memory_file.seek(0)
-
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    filename = f'filecat_print_{timestamp}.pdf'
-
-    return send_file(
-        memory_file,
-        mimetype='application/pdf',
-        as_attachment=True,
-        download_name=filename
-    )
-
-
-@app.route('/api/download/progress', methods=['POST'])
-def api_download_with_progress():
-    """Download images with progress tracking - Phase 2 Feature"""
-    data = request.json
-    image_ids = data.get('image_ids', [])
-
-    if not image_ids:
-        return jsonify({'error': 'No images selected'}), 400
-
-    def create_zip():
         try:
-            download_progress.update({'current': 0, 'total': len(image_ids), 'done': False, 'error': None})
+            for item in sorted(os.listdir(abs_path)):
+                item_path = os.path.join(abs_path, item)
 
-            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            filename = f'filecat_download_{timestamp}.zip'
-            download_progress['filename'] = filename
+                if os.path.isdir(item_path):
+                    # Count items in subfolder
+                    try:
+                        item_count = len(os.listdir(item_path))
+                    except:
+                        item_count = 0
 
-            # Create downloads directory if it doesn't exist
-            downloads_dir = os.path.join(os.path.dirname(__file__), 'downloads')
-            os.makedirs(downloads_dir, exist_ok=True)
+                    folders.append({
+                        'name': item,
+                        'count': item_count
+                    })
+                elif os.path.isfile(item_path):
+                    # Check if it's a supported image
+                    _, ext = os.path.splitext(item)
+                    if ext.lower() in SUPPORTED_EXTENSIONS:
+                        # Get relative path for database lookup
+                        rel_file_path = os.path.relpath(item_path, SOURCE_FOLDER)
 
-            zip_path = os.path.join(downloads_dir, filename)
+                        # Look up in database to get tags and ID
+                        from database import get_db_connection
+                        conn = get_db_connection()
+                        cursor = conn.cursor()
+                        cursor.execute('SELECT * FROM images WHERE filepath = ?', (rel_file_path,))
+                        img_data = cursor.fetchone()
 
-            with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
-                for idx, image_id in enumerate(image_ids):
-                    image = get_image_by_id(image_id)
-                    if image:
-                        source_path = os.path.join(SOURCE_FOLDER, image['filepath'])
-                        if os.path.exists(source_path):
-                            zf.write(source_path, image['filepath'])
-                    download_progress['current'] = idx + 1
+                        if img_data:
+                            img_dict = dict(img_data)
+                            img_dict['tags'] = get_image_tags(img_dict['id'])
+                            images_in_folder.append(img_dict)
 
-            download_progress['done'] = True
+                        conn.close()
         except Exception as e:
-            download_progress['error'] = str(e)
-            download_progress['done'] = True
+            print(f"Error reading directory {abs_path}: {e}")
 
-    # Start download in background
-    thread = threading.Thread(target=create_zip)
-    thread.start()
+        return jsonify({
+            'success': True,
+            'path': rel_path,
+            'folders': folders,
+            'images': images_in_folder
+        })
 
-    return jsonify({'started': True})
-
-
-@app.route('/api/download/status')
-def api_download_status():
-    """Stream download progress - Phase 2 Feature"""
-    def event_stream():
-        last_sent = -1
-        while not download_progress['done']:
-            if download_progress['current'] != last_sent or download_progress['error']:
-                yield f"data: {json.dumps(download_progress)}\n\n"
-                last_sent = download_progress['current']
-                if download_progress['error']:
-                    break
-        # Send final result
-        yield f"data: {json.dumps(download_progress)}\n\n"
-
-    return Response(event_stream(), mimetype='text/event-stream')
-
-
-@app.route('/api/download/file/<filename>')
-def api_download_file(filename):
-    """Download the generated ZIP file - Phase 2 Feature"""
-    downloads_dir = os.path.join(os.path.dirname(__file__), 'downloads')
-    file_path = os.path.join(downloads_dir, filename)
-
-    if os.path.exists(file_path):
-        return send_file(file_path, as_attachment=True, download_name=filename)
-    else:
-        return jsonify({'error': 'File not found'}), 404
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 
 # AI Auto-Tagging Endpoints - Phase 2 Feature
@@ -1213,14 +964,15 @@ def api_get_ai_settings():
         from ai_tagger import _model
         model_loaded = _model is not None
 
-        # Get statistics
-        unanalyzed = get_images_without_ai_suggestions()
+        # Get statistics - show untagged images that need AI processing
+        from database import get_untagged_images_for_ai
+        untagged_for_ai = get_untagged_images_for_ai()
 
         return jsonify({
             'success': True,
             'model_loaded': model_loaded,
             'model_name': 'STAG/RAM Plus',
-            'unanalyzed_count': len(unanalyzed),
+            'unanalyzed_count': len(untagged_for_ai),
             'auto_tag': auto_tag_stats
         })
     except Exception as e:
@@ -1276,7 +1028,8 @@ def api_trigger_auto_tag():
                 print(f"[AUTO-TAG] Found {new_files} new file(s)")
 
                 # Find untagged images
-                untagged = get_images_without_ai_suggestions()
+                from database import get_untagged_images_for_ai
+                untagged = get_untagged_images_for_ai()
                 images_to_process = untagged[:AUTO_TAG_BATCH_SIZE]
                 print(f"[AUTO-TAG] Processing {len(images_to_process)} images")
 
@@ -1343,6 +1096,321 @@ def api_auto_tag_stats():
     return jsonify(auto_tag_stats)
 
 
+# ===== File Integrity Management API =====
+
+@app.route('/api/integrity/scan', methods=['POST'])
+def api_integrity_scan():
+    """
+    Scan database for file integrity issues
+    Marks corrupted/missing files in database
+    """
+    try:
+        def progress(current, total, message):
+            # Could be enhanced to use SSE or websockets for real-time updates
+            pass
+
+        results = scan_database_integrity(progress_callback=progress, mark_in_db=True)
+
+        return jsonify({
+            'success': True,
+            'results': {
+                'total_checked': results['total_checked'],
+                'valid_files': results['valid_files'],
+                'missing_count': len(results['missing_files']),
+                'corrupted_count': len(results['corrupted_files']),
+                'missing_files': results['missing_files'],
+                'corrupted_files': results['corrupted_files']
+            }
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/integrity/issues', methods=['GET'])
+def api_integrity_issues():
+    """Get all files with integrity issues"""
+    try:
+        from database import get_images_with_integrity_issues, get_integrity_stats
+
+        issues = get_images_with_integrity_issues()
+        stats = get_integrity_stats()
+
+        return jsonify({
+            'success': True,
+            'issues': issues,
+            'stats': stats
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/integrity/cleanup-missing', methods=['POST'])
+def api_integrity_cleanup_missing():
+    """Remove database records for missing files"""
+    try:
+        results = cleanup_missing_files()
+
+        return jsonify({
+            'success': True,
+            'removed_count': results['removed_count'],
+            'removed_files': results['removed_files']
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/integrity/handle-corrupted', methods=['POST'])
+def api_integrity_handle_corrupted():
+    """
+    Handle corrupted file
+    Actions: 'skip', 'delete', or 'quarantine'
+    """
+    try:
+        data = request.json
+        image_id = data.get('image_id')
+        action = data.get('action', 'skip')
+        quarantine_folder = data.get('quarantine_folder')
+
+        if not image_id:
+            return jsonify({'error': 'image_id required'}), 400
+
+        result = handle_corrupted_file(image_id, action, quarantine_folder)
+
+        if result['success']:
+            return jsonify(result)
+        else:
+            return jsonify({'error': result['message']}), 400
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/integrity/scan-new-files', methods=['POST'])
+def api_integrity_scan_new_files():
+    """Scan for new files not in database"""
+    try:
+        results = scan_for_new_files()
+
+        return jsonify({
+            'success': True,
+            'total_found': results['total_found'],
+            'new_files': results['new_files']
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/integrity/add-new-file', methods=['POST'])
+def api_integrity_add_new_file():
+    """Add a new file to database with integrity check"""
+    try:
+        data = request.json
+        filepath = data.get('filepath')
+
+        if not filepath:
+            return jsonify({'error': 'filepath required'}), 400
+
+        result = add_new_file(filepath)
+
+        if result['success']:
+            return jsonify(result)
+        else:
+            return jsonify({'error': result['message']}), 400
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+# ===== Thumbnail Management API =====
+
+@app.route('/api/duplicates', methods=['GET'])
+def api_find_duplicates():
+    """Find duplicate images by file checksum (content-based, not filename)"""
+    try:
+        from database import get_db_connection
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        # Find duplicates by checksum where checksum has been computed
+        cursor.execute('''
+            SELECT file_checksum, COUNT(*) as count
+            FROM images
+            WHERE file_checksum IS NOT NULL AND file_checksum != ''
+            GROUP BY file_checksum
+            HAVING COUNT(*) > 1
+            ORDER BY count DESC
+        ''')
+        duplicate_groups = cursor.fetchall()
+
+        results = []
+        for group in duplicate_groups:
+            cursor.execute('''
+                SELECT id, filepath, filename, file_size, date_added, is_tagged
+                FROM images
+                WHERE file_checksum = ?
+                ORDER BY filepath
+            ''', (group['file_checksum'],))
+            files = [dict(row) for row in cursor.fetchall()]
+            results.append({
+                'checksum': group['file_checksum'],
+                'count': group['count'],
+                'file_size': files[0]['file_size'] if files else 0,
+                'files': files
+            })
+
+        # Also check how many images still need checksums computed
+        cursor.execute('SELECT COUNT(*) as cnt FROM images WHERE file_checksum IS NULL OR file_checksum = ""')
+        missing_checksums = cursor.fetchone()['cnt']
+
+        conn.close()
+
+        total_duplicates = sum(g['count'] - 1 for g in results)
+        return jsonify({
+            'success': True,
+            'groups': results,
+            'total_groups': len(results),
+            'total_duplicates': total_duplicates,
+            'missing_checksums': missing_checksums
+        })
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/duplicates/compute-checksums', methods=['POST'])
+def api_compute_checksums():
+    """Compute checksums for all images that don't have one yet"""
+    import hashlib
+
+    try:
+        from database import get_db_connection
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        cursor.execute('SELECT id, filepath FROM images WHERE file_checksum IS NULL OR file_checksum = ""')
+        images = cursor.fetchall()
+        total = len(images)
+        computed = 0
+        errors = 0
+
+        for row in images:
+            full_path = os.path.join(SOURCE_FOLDER, row['filepath'])
+            if os.path.exists(full_path):
+                try:
+                    h = hashlib.md5()
+                    with open(full_path, 'rb') as f:
+                        for chunk in iter(lambda: f.read(8192), b''):
+                            h.update(chunk)
+                    checksum = h.hexdigest()
+                    cursor.execute('UPDATE images SET file_checksum = ? WHERE id = ?', (checksum, row['id']))
+                    computed += 1
+                except Exception:
+                    errors += 1
+            else:
+                errors += 1
+
+        conn.commit()
+        conn.close()
+
+        return jsonify({
+            'success': True,
+            'total': total,
+            'computed': computed,
+            'errors': errors
+        })
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/thumbnails/regenerate', methods=['POST'])
+def api_regenerate_thumbnails():
+    """Regenerate all thumbnails in background"""
+    try:
+        # Reset progress data
+        progress_data.update({
+            'current': 0,
+            'total': 1,
+            'done': False,
+            'success': 0,
+            'failed': 0
+        })
+
+        def run_regeneration():
+            """Background task to regenerate thumbnails"""
+            try:
+                # Get all images
+                from database import get_db_connection
+                conn = get_db_connection()
+                cursor = conn.cursor()
+                cursor.execute('SELECT id, filepath FROM images')
+                images = cursor.fetchall()
+
+                total = len(images)
+                progress_data['total'] = total
+                success_count = 0
+                failed_count = 0
+
+                for idx, row in enumerate(images):
+                    source_path = os.path.join(SOURCE_FOLDER, row['filepath'])
+
+                    if not os.path.exists(source_path):
+                        failed_count += 1
+                    else:
+                        thumbnail_path = generate_thumbnail(source_path, row['filepath'])
+
+                        if thumbnail_path:
+                            cursor.execute('UPDATE images SET thumbnail_path = ? WHERE id = ?',
+                                          (thumbnail_path, row['id']))
+                            success_count += 1
+                        else:
+                            failed_count += 1
+
+                    # Update progress
+                    progress_data.update({
+                        'current': idx + 1,
+                        'success': success_count,
+                        'failed': failed_count
+                    })
+
+                conn.commit()
+                conn.close()
+
+                # Mark as complete
+                progress_data['done'] = True
+
+            except Exception as e:
+                print(f"[Thumbnail] Error during regeneration: {e}")
+                import traceback
+                traceback.print_exc()
+                progress_data['done'] = True
+
+        # Start regeneration in background
+        thread = threading.Thread(target=run_regeneration)
+        thread.start()
+
+        return jsonify({'success': True, 'message': 'Thumbnail regeneration started'})
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/thumbnails/progress')
+def api_thumbnails_progress():
+    """Stream thumbnail regeneration progress via Server-Sent Events"""
+    def event_stream():
+        last_sent_current = -1
+        while not progress_data['done']:
+            if progress_data['current'] != last_sent_current:
+                yield f"data: {json.dumps(progress_data)}\n\n"
+                last_sent_current = progress_data['current']
+            time.sleep(0.1)  # Check every 100ms
+        # Send final result
+        yield f"data: {json.dumps(progress_data)}\n\n"
+
+    return Response(event_stream(), mimetype='text/event-stream')
+
+
 @app.route('/init_db', methods=['POST'])
 def api_init_db():
     """Initialize database"""
@@ -1359,9 +1427,14 @@ if __name__ == '__main__':
     print(f"Starting FileCat on http://{HOST}:{PORT}")
     print(f"Source folder: {SOURCE_FOLDER}")
 
-    # Start background auto-tagging service ONLY in main process
-    # (not in Flask's reloader process to avoid duplicate threads)
-    if AUTO_TAG_ENABLED and os.environ.get('WERKZEUG_RUN_MAIN') == 'true':
+    # Determine if we should start the auto-tag service
+    # In debug mode with reloader, only start in the child process (WERKZEUG_RUN_MAIN=true)
+    # When running without reloader (e.g. IDE debugger), always start
+    use_reloader = DEBUG  # Flask uses reloader when debug=True
+    is_main_process = os.environ.get('WERKZEUG_RUN_MAIN') == 'true'
+    should_start_autotag = AUTO_TAG_ENABLED and AI_TAGGER_AVAILABLE and (is_main_process or not use_reloader)
+
+    if should_start_autotag:
         print(f"\n{'='*60}")
         print(f"[AUTO-TAG] Auto-tagging is ENABLED")
         print(f"[AUTO-TAG] Interval: {AUTO_TAG_INTERVAL} seconds ({AUTO_TAG_INTERVAL/60:.1f} minutes)")
@@ -1370,23 +1443,17 @@ if __name__ == '__main__':
         print(f"{'='*60}\n")
         start_auto_tag_service()
 
-        # Optionally run one cycle on startup
         if AUTO_TAG_ON_STARTUP:
             print("[AUTO-TAG] AUTO_TAG_ON_STARTUP is enabled, triggering initial scan...")
-            # Give the server a moment to start, then trigger
-            def startup_tag():
-                time.sleep(5)  # Wait for server to be ready
-                import requests
-                try:
-                    requests.post(f'http://localhost:{PORT}/api/ai/auto-tag/trigger')
-                except:
-                    pass  # Server might not be ready yet
-            threading.Thread(target=startup_tag, daemon=True).start()
+    elif AUTO_TAG_ENABLED and not AI_TAGGER_AVAILABLE:
+        print("[AUTO-TAG] Auto-tagging is ENABLED but AI tagger failed to load (check dependencies)")
     elif AUTO_TAG_ENABLED:
         print("[AUTO-TAG] Skipping background service in reloader process (prevents duplicates)")
     else:
         print("[AUTO-TAG] Auto-tagging is DISABLED (set AUTO_TAG_ENABLED=True in config.py to enable)")
 
     app.run(host=HOST, port=PORT, debug=DEBUG)
+
+
 
 

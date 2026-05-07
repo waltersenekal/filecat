@@ -1,0 +1,455 @@
+{% extends "base.html" %}
+
+{% block title %}Browse - FileCat{% endblock %}
+
+{% block content %}
+<h1>Browse Folders</h1>
+
+<div class="card">
+    <!-- Breadcrumb navigation -->
+    <div id="breadcrumb" style="margin-bottom: 1rem; display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
+        <button class="btn btn-secondary" onclick="navigateToPath('')" title="Go to root">
+            🏠 Root
+        </button>
+        <span id="breadcrumbPath"></span>
+    </div>
+
+    <!-- Folder/File count -->
+    <div id="itemCount" style="color: var(--text-secondary); margin-bottom: 1rem;"></div>
+
+    <!-- Thumbnail size control -->
+    <div style="margin-bottom: 1rem;">
+        <label>
+            Thumbnail Size:
+            <select id="thumbnailSize" class="form-select" style="width: auto;" onchange="changeThumbnailSize()">
+                <option value="150">Small</option>
+                <option value="250" selected>Medium</option>
+                <option value="350">Large</option>
+            </select>
+        </label>
+    </div>
+</div>
+
+<div class="card">
+    <!-- Folders Grid -->
+    <div id="foldersGrid" style="display: none; margin-bottom: 2rem;">
+        <h3 style="margin-bottom: 1rem;">📁 Folders</h3>
+        <div id="foldersList" style="display: grid; gap: 1rem; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));"></div>
+    </div>
+
+    <!-- Images Grid -->
+    <div id="imagesSection" style="display: none;">
+        <h3 style="margin-bottom: 1rem;">🖼️ Images</h3>
+        <div id="imageGrid" class="image-grid">
+            <div class="loading">Loading...</div>
+        </div>
+    </div>
+
+    <!-- Empty state -->
+    <div id="emptyState" style="text-align: center; padding: 3rem; color: var(--text-secondary);">
+        <p style="font-size: 1.2rem;">📂 Select a folder to browse</p>
+    </div>
+</div>
+
+<!-- Lightbox -->
+<div id="lightbox" class="lightbox" onclick="closeLightbox()">
+    <span class="lightbox-close">&times;</span>
+    <span class="lightbox-nav lightbox-prev" onclick="event.stopPropagation(); navigateLightbox(-1)">&#10094;</span>
+    <img id="lightboxImage" class="lightbox-content" alt="Full size image">
+    <span class="lightbox-nav lightbox-next" onclick="event.stopPropagation(); navigateLightbox(1)">&#10095;</span>
+    <div id="lightboxInfo" style="position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%); background: rgba(0,0,0,0.8); color: white; padding: 1rem; border-radius: 8px; max-width: 80%;"></div>
+</div>
+
+<!-- Edit Tags Modal -->
+<div id="editTagsModal" class="modal" onclick="closeEditTagsModal()">
+    <div class="modal-content" onclick="event.stopPropagation()">
+        <h2>Edit Tags</h2>
+        <p id="editTagsImageName" style="color: var(--text-secondary); margin-bottom: 1rem;"></p>
+
+        <div class="form-group">
+            <label class="form-label">Add Tags (comma-separated):</label>
+            <input type="text" id="editTagsInput" class="form-input" placeholder="e.g., baby, outdoor" autocomplete="off">
+            <div id="editTagsSuggestions" style="margin-top: 0.5rem; display: flex; flex-wrap: wrap; gap: 0.5rem;"></div>
+        </div>
+
+        <div class="form-group">
+            <label class="form-label">Current Tags:</label>
+            <div id="editTagsCurrent" style="display: flex; flex-wrap: wrap; gap: 0.5rem; min-height: 2rem;"></div>
+        </div>
+
+        <div style="display: flex; gap: 1rem; justify-content: flex-end; margin-top: 1.5rem;">
+            <button class="btn btn-secondary" onclick="closeEditTagsModal()">Cancel</button>
+            <button class="btn btn-primary" onclick="saveImageTags()">Save Tags</button>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let currentPath = '';
+let currentImages = [];
+let currentFolders = [];
+let currentLightboxIndex = 0;
+let currentEditImageId = null;
+let allTags = [];
+
+// Load all tags for suggestions
+async function loadAllTags() {
+    try {
+        const response = await fetch('/api/tags');
+        if (!response.ok) throw new Error('Failed to load tags');
+        const data = await response.json();
+        allTags = data.tags;
+    } catch (error) {
+        console.error('Error loading tags:', error);
+    }
+}
+
+// Navigate to a specific path
+async function navigateToPath(path) {
+    currentPath = path;
+    await loadFolderContents(path);
+    updateBreadcrumb(path);
+}
+
+// Load folder contents (subfolders and images)
+async function loadFolderContents(path) {
+    try {
+        const response = await fetch(`/api/browse?path=${encodeURIComponent(path)}`);
+        if (!response.ok) throw new Error('Failed to load folder contents');
+
+        const data = await response.json();
+        currentFolders = data.folders || [];
+        currentImages = data.images || [];
+
+        displayFolders(currentFolders);
+        displayImages(currentImages);
+        updateItemCount(currentFolders.length, currentImages.length);
+
+    } catch (error) {
+        console.error('Error loading folder:', error);
+        alert('Error loading folder contents. Please try again.');
+    }
+}
+
+// Update breadcrumb navigation
+function updateBreadcrumb(path) {
+    const breadcrumbPath = document.getElementById('breadcrumbPath');
+
+    if (!path) {
+        breadcrumbPath.innerHTML = '';
+        return;
+    }
+
+    const parts = path.split('/').filter(p => p);
+    let html = '';
+    let currentPathBuild = '';
+
+    for (let i = 0; i < parts.length; i++) {
+        currentPathBuild += (i > 0 ? '/' : '') + parts[i];
+        const pathForClick = currentPathBuild;
+        html += `
+            <span style="color: var(--text-secondary);">/</span>
+            <button class="btn btn-secondary" onclick="navigateToPath('${pathForClick.replace(/'/g, "\\'")}')">
+                ${parts[i]}
+            </button>
+        `;
+    }
+
+    breadcrumbPath.innerHTML = html;
+}
+
+// Display folders
+function displayFolders(folders) {
+    const foldersGrid = document.getElementById('foldersGrid');
+    const foldersList = document.getElementById('foldersList');
+
+    if (folders.length === 0) {
+        foldersGrid.style.display = 'none';
+        return;
+    }
+
+    foldersGrid.style.display = 'block';
+    foldersList.innerHTML = folders.map(folder => `
+        <div onclick="navigateToPath('${(currentPath ? currentPath + '/' : '') + folder.name}')"
+             style="cursor: pointer; padding: 1rem; background: var(--card-bg); border: 1px solid var(--border-color); border-radius: 8px; display: flex; align-items: center; gap: 0.5rem; transition: all 0.2s;"
+             onmouseover="this.style.background='var(--hover-bg)'; this.style.transform='translateY(-2px)'; this.style.boxShadow='0 4px 8px rgba(0,0,0,0.1)';"
+             onmouseout="this.style.background='var(--card-bg)'; this.style.transform='translateY(0)'; this.style.boxShadow='none';">
+            <span style="font-size: 2rem;">📁</span>
+            <div style="flex: 1; overflow: hidden;">
+                <div style="font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="${folder.name}">
+                    ${folder.name}
+                </div>
+                <div style="font-size: 0.75rem; color: var(--text-secondary);">
+                    ${folder.count} item${folder.count !== 1 ? 's' : ''}
+                </div>
+            </div>
+        </div>
+    `).join('');
+}
+
+// Display images
+function displayImages(images) {
+    const imagesSection = document.getElementById('imagesSection');
+    const imageGrid = document.getElementById('imageGrid');
+    const emptyState = document.getElementById('emptyState');
+
+    if (images.length === 0 && currentFolders.length === 0) {
+        emptyState.style.display = 'block';
+        imagesSection.style.display = 'none';
+        return;
+    }
+
+    emptyState.style.display = 'none';
+
+    if (images.length === 0) {
+        imagesSection.style.display = 'none';
+        return;
+    }
+
+    imagesSection.style.display = 'block';
+    const thumbnailSize = document.getElementById('thumbnailSize').value;
+    imageGrid.style.gridTemplateColumns = `repeat(auto-fill, minmax(${thumbnailSize}px, 1fr))`;
+
+    imageGrid.innerHTML = images.map((img, idx) => `
+        <div class="image-item">
+            <div class="image-wrapper" onclick="openLightbox(${idx})">
+                <img src="/thumbnails/${img.thumbnail_path}"
+                     alt="${img.filename}"
+                     loading="lazy"
+                     onerror="this.onerror=null; this.src='data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 width=%22200%22 height=%22200%22><rect width=%22200%22 height=%22200%22 fill=%22%23f3f4f6%22/><text x=%2250%%22 y=%2250%%22 text-anchor=%22middle%22 dy=%22.3em%22 font-family=%22sans-serif%22 font-size=%2214%22 fill=%22%23999%22>Missing</text></svg>'; this.style.border='2px dashed #dc2626';">
+            </div>
+            <div class="image-info">
+                <div class="image-filename" title="${img.filepath}">${img.filename}</div>
+                <div style="font-size: 0.75rem; color: var(--text-secondary);">
+                    ${(img.file_size / 1024).toFixed(1)} KB
+                </div>
+                <div class="image-tags" style="min-height: 1.5rem;">
+                    ${img.tags && img.tags.length > 0 ? img.tags.map(tag =>
+                        `<span class="tag" style="cursor: pointer;" onclick="event.stopPropagation(); removeTagFromImage(${img.id}, ${tag.id}, '${tag.tag_name}')" title="Click to remove">${tag.tag_name} ×</span>`
+                    ).join('') : '<span style="color: var(--text-secondary); font-size: 0.75rem;">No tags</span>'}
+                    <button onclick="event.stopPropagation(); openEditTagsModal(${img.id}, '${img.filename.replace(/'/g, "\\'")}', ${JSON.stringify(img.tags || []).replace(/"/g, '&quot;')})"
+                            class="btn btn-secondary"
+                            style="padding: 0.2rem 0.5rem; font-size: 0.7rem; margin-left: 0.25rem;">
+                        + Tag
+                    </button>
+                </div>
+            </div>
+        </div>
+    `).join('');
+}
+
+// Update item count display
+function updateItemCount(folderCount, imageCount) {
+    const itemCount = document.getElementById('itemCount');
+    const parts = [];
+
+    if (folderCount > 0) {
+        parts.push(`${folderCount} folder${folderCount !== 1 ? 's' : ''}`);
+    }
+    if (imageCount > 0) {
+        parts.push(`${imageCount} image${imageCount !== 1 ? 's' : ''}`);
+    }
+
+    itemCount.textContent = parts.length > 0 ? parts.join(', ') : 'Empty folder';
+}
+
+// Change thumbnail size
+function changeThumbnailSize() {
+    displayImages(currentImages);
+}
+
+// Lightbox functions
+function openLightbox(index) {
+    currentLightboxIndex = index;
+    const image = currentImages[index];
+    document.getElementById('lightboxImage').src = `/images/${image.filepath}`;
+
+    // Show image info
+    const infoHtml = `
+        <div style="font-weight: bold; margin-bottom: 0.5rem;">${image.filename}</div>
+        <div style="font-size: 0.875rem;">
+            ${image.tags && image.tags.length > 0 ?
+                image.tags.map(tag => `<span class="tag" style="margin: 0.25rem;">${tag.tag_name}</span>`).join('') :
+                '<span style="color: #ccc;">No tags</span>'}
+        </div>
+    `;
+    document.getElementById('lightboxInfo').innerHTML = infoHtml;
+
+    document.getElementById('lightbox').classList.add('active');
+}
+
+function closeLightbox() {
+    document.getElementById('lightbox').classList.remove('active');
+}
+
+function navigateLightbox(direction) {
+    currentLightboxIndex += direction;
+    if (currentLightboxIndex < 0) currentLightboxIndex = currentImages.length - 1;
+    if (currentLightboxIndex >= currentImages.length) currentLightboxIndex = 0;
+
+    const image = currentImages[currentLightboxIndex];
+    document.getElementById('lightboxImage').src = `/images/${image.filepath}`;
+
+    // Update image info
+    const infoHtml = `
+        <div style="font-weight: bold; margin-bottom: 0.5rem;">${image.filename}</div>
+        <div style="font-size: 0.875rem;">
+            ${image.tags && image.tags.length > 0 ?
+                image.tags.map(tag => `<span class="tag" style="margin: 0.25rem;">${tag.tag_name}</span>`).join('') :
+                '<span style="color: #ccc;">No tags</span>'}
+        </div>
+    `;
+    document.getElementById('lightboxInfo').innerHTML = infoHtml;
+}
+
+// Keyboard navigation
+document.addEventListener('keydown', (e) => {
+    const lightbox = document.getElementById('lightbox');
+    if (!lightbox.classList.contains('active')) return;
+
+    if (e.key === 'Escape') closeLightbox();
+    if (e.key === 'ArrowLeft') navigateLightbox(-1);
+    if (e.key === 'ArrowRight') navigateLightbox(1);
+});
+
+// Tag editing functions
+function openEditTagsModal(imageId, filename, currentTags) {
+    currentEditImageId = imageId;
+    document.getElementById('editTagsImageName').textContent = filename;
+    document.getElementById('editTagsInput').value = '';
+
+    // Display current tags
+    const container = document.getElementById('editTagsCurrent');
+    if (currentTags && currentTags.length > 0) {
+        container.innerHTML = currentTags.map(tag =>
+            `<span class="tag" style="cursor: pointer;" onclick="removeTagFromImageInModal(${tag.id}, '${tag.tag_name}')" title="Click to remove">${tag.tag_name} ×</span>`
+        ).join('');
+    } else {
+        container.innerHTML = '<span style="color: var(--text-secondary); font-size: 0.875rem;">No tags yet</span>';
+    }
+
+    // Show tag suggestions
+    displayEditTagSuggestions();
+
+    document.getElementById('editTagsModal').classList.add('active');
+}
+
+function closeEditTagsModal() {
+    document.getElementById('editTagsModal').classList.remove('active');
+    currentEditImageId = null;
+}
+
+function displayEditTagSuggestions() {
+    const container = document.getElementById('editTagsSuggestions');
+    const topTags = allTags.slice(0, 15);
+
+    if (topTags.length > 0) {
+        container.innerHTML = '<small style="color: var(--text-secondary);">Quick Tags: </small>' +
+            topTags.map(tag =>
+                `<button type="button" class="btn btn-secondary" style="padding: 0.25rem 0.75rem; font-size: 0.75rem;"
+                        onclick="addTagToEditInput('${tag.tag_name}')">${tag.tag_name}</button>`
+            ).join('');
+    }
+}
+
+function addTagToEditInput(tag) {
+    const input = document.getElementById('editTagsInput');
+    const currentValue = input.value.trim();
+    if (currentValue) {
+        input.value = currentValue + ', ' + tag;
+    } else {
+        input.value = tag;
+    }
+    input.focus();
+}
+
+async function saveImageTags() {
+    const tagsInput = document.getElementById('editTagsInput').value.trim();
+
+    if (!tagsInput) {
+        closeEditTagsModal();
+        return;
+    }
+
+    try {
+        const response = await fetch(`/api/images/${currentEditImageId}/tags`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ tags: tagsInput })
+        });
+
+        if (!response.ok) {
+            throw new Error('Failed to save tags');
+        }
+
+        // Reload tags and current folder
+        await loadAllTags();
+        await loadFolderContents(currentPath);
+        closeEditTagsModal();
+    } catch (error) {
+        console.error('Error saving tags:', error);
+        alert('Error saving tags. Please try again.');
+    }
+}
+
+async function removeTagFromImage(imageId, tagId, tagName) {
+    if (!confirm(`Remove tag "${tagName}" from this image?`)) return;
+
+    try {
+        const response = await fetch(`/api/images/${imageId}/tags/${tagId}`, {
+            method: 'DELETE'
+        });
+
+        if (!response.ok) {
+            throw new Error('Failed to remove tag');
+        }
+
+        // Reload current folder to update display
+        await loadFolderContents(currentPath);
+    } catch (error) {
+        console.error('Error removing tag:', error);
+        alert('Error removing tag. Please try again.');
+    }
+}
+
+async function removeTagFromImageInModal(tagId, tagName) {
+    if (!confirm(`Remove tag "${tagName}"?`)) return;
+
+    try {
+        const response = await fetch(`/api/images/${currentEditImageId}/tags/${tagId}`, {
+            method: 'DELETE'
+        });
+
+        if (!response.ok) {
+            throw new Error('Failed to remove tag');
+        }
+
+        // Reload the modal to show updated tags
+        const imgResponse = await fetch(`/api/images/${currentEditImageId}`);
+        const imgData = await imgResponse.json();
+
+        const container = document.getElementById('editTagsCurrent');
+        if (imgData.tags && imgData.tags.length > 0) {
+            container.innerHTML = imgData.tags.map(tag =>
+                `<span class="tag" style="cursor: pointer;" onclick="removeTagFromImageInModal(${tag.id}, '${tag.tag_name}')" title="Click to remove">${tag.tag_name} ×</span>`
+            ).join('');
+        } else {
+            container.innerHTML = '<span style="color: var(--text-secondary); font-size: 0.875rem;">No tags yet</span>';
+        }
+
+        // Also reload the current folder
+        await loadFolderContents(currentPath);
+    } catch (error) {
+        console.error('Error removing tag:', error);
+        alert('Error removing tag. Please try again.');
+    }
+}
+
+// Initialize page
+console.log('[Browse] Page initialized');
+loadAllTags();
+navigateToPath('');
+</script>
+{% endblock %}

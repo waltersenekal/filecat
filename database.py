@@ -45,10 +45,14 @@ def init_database():
             filepath TEXT UNIQUE NOT NULL,
             filename TEXT NOT NULL,
             file_size INTEGER,
+            file_checksum TEXT,
             date_added TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             date_modified TIMESTAMP,
             thumbnail_path TEXT,
-            is_tagged BOOLEAN DEFAULT 0
+            is_tagged BOOLEAN DEFAULT 0,
+            integrity_status TEXT DEFAULT 'unchecked',
+            integrity_error TEXT,
+            integrity_checked_at TIMESTAMP
         )
     ''')
     
@@ -94,12 +98,27 @@ def init_database():
         )
     ''')
 
+    # Migration: add file_checksum column if missing
+    cursor.execute("PRAGMA table_info(images)")
+    columns = [col[1] for col in cursor.fetchall()]
+    if 'file_checksum' not in columns:
+        cursor.execute('ALTER TABLE images ADD COLUMN file_checksum TEXT')
+
     # Create indexes for better performance
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_filepath ON images(filepath)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_is_tagged ON images(is_tagged)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_tag_name ON tags(tag_name)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_image_tags ON image_tags(image_id, tag_id)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_ai_suggestions ON ai_suggestions(image_id, status)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_file_checksum ON images(file_checksum)')
+
+    # Folder mtimes table for incremental scanning
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS folder_mtimes (
+            folder_path TEXT PRIMARY KEY,
+            last_mtime REAL NOT NULL
+        )
+    ''')
 
     conn.commit()
     conn.close()
@@ -567,11 +586,19 @@ def save_ai_suggestions(image_id, suggestions):
     cursor.execute('DELETE FROM ai_suggestions WHERE image_id = ?', (image_id,))
 
     # Insert new suggestions
-    for tag_name, confidence in suggestions:
+    if suggestions:
+        for tag_name, confidence in suggestions:
+            cursor.execute('''
+                INSERT INTO ai_suggestions (image_id, tag_name, confidence, status)
+                VALUES (?, ?, ?, 'pending')
+            ''', (image_id, tag_name, confidence))
+    else:
+        # No suggestions - insert a placeholder to mark as processed
+        # This prevents the image from appearing as "unprocessed"
         cursor.execute('''
             INSERT INTO ai_suggestions (image_id, tag_name, confidence, status)
-            VALUES (?, ?, ?, 'pending')
-        ''', (image_id, tag_name, confidence))
+            VALUES (?, ?, ?, 'processed')
+        ''', (image_id, '__NO_SUGGESTIONS__', 0.0))
 
     conn.commit()
     conn.close()
@@ -714,7 +741,10 @@ def clear_ai_suggestions(image_id, status=None):
 
 
 def get_images_without_ai_suggestions(limit=None):
-    """Get images that haven't been analyzed by AI yet"""
+    """
+    Get images that haven't been analyzed by AI yet (no ai_suggestions records)
+    Excludes images with integrity issues
+    """
     conn = get_db_connection()
     cursor = conn.cursor()
 
@@ -722,6 +752,7 @@ def get_images_without_ai_suggestions(limit=None):
         SELECT i.* FROM images i
         LEFT JOIN ai_suggestions ai ON i.id = ai.image_id
         WHERE ai.id IS NULL
+        AND (i.integrity_status IS NULL OR i.integrity_status IN ('unchecked', 'valid'))
         ORDER BY i.date_added DESC
     '''
 
@@ -734,6 +765,122 @@ def get_images_without_ai_suggestions(limit=None):
     return [dict(img) for img in images]
 
 
-if __name__ == '__main__':
-    # Initialize database when run directly
-    init_database()
+def get_untagged_images_for_ai(limit=None):
+    """
+    Get images that need AI tagging (truly untagged images)
+    Returns images where:
+    - is_tagged = 0 (no tags applied)
+    - No integrity issues
+    This is what the dashboard should show for "Images that need tags"
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    query = '''
+        SELECT * FROM images
+        WHERE is_tagged = 0
+        AND (integrity_status IS NULL OR integrity_status IN ('unchecked', 'valid'))
+        ORDER BY date_added DESC
+    '''
+
+    if limit:
+        query += f' LIMIT {limit}'
+
+    cursor.execute(query)
+    images = cursor.fetchall()
+    conn.close()
+    return [dict(img) for img in images]
+
+
+def update_image_integrity(image_id, status, error_message=None):
+    """
+    Update integrity status of an image
+
+    Args:
+        image_id: Image ID
+        status: 'valid', 'missing', 'corrupted', or 'unchecked'
+        error_message: Optional error message
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    cursor.execute('''
+        UPDATE images 
+        SET integrity_status = ?, 
+            integrity_error = ?, 
+            integrity_checked_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+    ''', (status, error_message, image_id))
+
+    conn.commit()
+    conn.close()
+
+
+def get_images_with_integrity_issues():
+    """Get all images with integrity issues (missing or corrupted)"""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    cursor.execute('''
+        SELECT * FROM images 
+        WHERE integrity_status IN ('missing', 'corrupted')
+        ORDER BY integrity_checked_at DESC
+    ''')
+
+    images = cursor.fetchall()
+    conn.close()
+    return [dict(img) for img in images]
+
+
+def get_integrity_stats():
+    """Get statistics on file integrity"""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    stats = {}
+
+    # Count by status
+    cursor.execute('''
+        SELECT integrity_status, COUNT(*) as count 
+        FROM images 
+        GROUP BY integrity_status
+    ''')
+
+    for row in cursor.fetchall():
+        status = row['integrity_status'] or 'unchecked'
+        stats[status] = row['count']
+
+    conn.close()
+    return stats
+
+
+# Folder mtime operations for incremental scanning
+
+def get_all_folder_mtimes():
+    """Get all stored folder mtimes as a dict"""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT folder_path, last_mtime FROM folder_mtimes')
+    result = {row['folder_path']: row['last_mtime'] for row in cursor.fetchall()}
+    conn.close()
+    return result
+
+
+def save_folder_mtimes(folder_mtime_dict):
+    """Bulk save folder mtimes"""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.executemany(
+        'INSERT OR REPLACE INTO folder_mtimes (folder_path, last_mtime) VALUES (?, ?)',
+        list(folder_mtime_dict.items())
+    )
+    conn.commit()
+    conn.close()
+
+
+def remove_folder_mtime(folder_path):
+    """Remove a folder mtime entry (e.g. folder was deleted)"""
+    conn = get_db_connection()
+    conn.execute('DELETE FROM folder_mtimes WHERE folder_path = ?', (folder_path,))
+    conn.commit()
+    conn.close()

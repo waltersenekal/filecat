@@ -1,11 +1,15 @@
 """
 File scanner for detecting images in Digital Papers folder
-Only scans for image files, ignores all non-image content
+Only scans for image files, ignores all non-image content.
+Uses directory mtime tracking for incremental scanning - only checks
+folders whose modification time has changed since the last scan.
 """
 import os
+import sys
+import hashlib
 from datetime import datetime
 from config import SOURCE_FOLDER, SUPPORTED_EXTENSIONS, THUMBNAIL_FOLDER
-from database import add_image, get_db_connection
+from database import add_image, get_db_connection, get_all_folder_mtimes, save_folder_mtimes
 from thumbnail_generator import generate_thumbnail
 
 
@@ -15,14 +19,25 @@ def is_image_file(filename):
     return ext in SUPPORTED_EXTENSIONS
 
 
-def scan_folder(progress_callback=None):
+def compute_file_checksum(filepath):
+    """Compute MD5 checksum of a file"""
+    h = hashlib.md5()
+    with open(filepath, 'rb') as f:
+        for chunk in iter(lambda: f.read(8192), b''):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def scan_folder(progress_callback=None, full_scan=False):
     """
     Scan the Digital Papers folder for image files only.
-    Ignores all non-image content.
-    
+    Uses incremental scanning based on directory modification times.
+    Only directories whose mtime has changed since the last scan are checked.
+
     Args:
         progress_callback: Optional function to call with progress updates
-        
+        full_scan: If True, ignore cached mtimes and scan everything
+
     Returns:
         dict with scan statistics
     """
@@ -31,6 +46,8 @@ def scan_folder(progress_callback=None):
         'total_files_found': 0,
         'new_images': 0,
         'existing_images': 0,
+        'skipped_folders': 0,
+        'scanned_folders': 0,
         'errors': [],
         'start_time': datetime.now()
     }
@@ -46,9 +63,37 @@ def scan_folder(progress_callback=None):
     existing_paths = {row['filepath'] for row in cursor.fetchall()}
     conn.close()
     
-    # Walk through directory tree
+    # Load cached folder mtimes for incremental scanning
+    cached_mtimes = {} if full_scan else get_all_folder_mtimes()
+    updated_mtimes = {}
+
+    # Walk through directory tree (alphabetical order)
     for root, dirs, files in os.walk(SOURCE_FOLDER):
-        for filename in files:
+        dirs.sort()
+
+        # Check if this directory has changed since last scan
+        rel_dir = os.path.relpath(root, SOURCE_FOLDER)
+        try:
+            current_mtime = os.stat(root).st_mtime
+        except OSError:
+            continue
+
+        cached_mtime = cached_mtimes.get(rel_dir)
+        updated_mtimes[rel_dir] = current_mtime
+
+        # Skip this directory if mtime unchanged (contents haven't changed)
+        if cached_mtime is not None and current_mtime == cached_mtime:
+            stats['skipped_folders'] += 1
+            continue
+
+        stats['scanned_folders'] += 1
+        image_files_in_dir = [f for f in files if is_image_file(f)]
+        if DEBUG:
+            print(f"[SCAN] Scanning changed folder: {rel_dir} ({len(image_files_in_dir)} images)", flush=True)
+
+        new_in_dir = 0
+        existing_in_dir = 0
+        for file_idx, filename in enumerate(sorted(files)):
             # Only process image files
             if not is_image_file(filename):
                 continue
@@ -59,16 +104,15 @@ def scan_folder(progress_callback=None):
             # Skip if already in database
             if relative_path in existing_paths:
                 stats['existing_images'] += 1
-                if progress_callback:
-                    progress_callback(f"Already in database: {relative_path}")
-                if DEBUG:
-                    print(f"[SCAN] Already in database: {relative_path}")
+                existing_in_dir += 1
                 continue
             try:
                 # Get file metadata
                 file_stat = os.stat(full_path)
                 file_size = file_stat.st_size
                 date_modified = datetime.fromtimestamp(file_stat.st_mtime)
+                # Compute checksum
+                file_checksum = compute_file_checksum(full_path)
                 # Generate thumbnail
                 thumbnail_path = generate_thumbnail(full_path, relative_path)
                 # Add to database
@@ -80,26 +124,47 @@ def scan_folder(progress_callback=None):
                     thumbnail_path=thumbnail_path
                 )
                 if image_id:
+                    # Store checksum
+                    conn2 = get_db_connection()
+                    conn2.execute('UPDATE images SET file_checksum = ? WHERE id = ?', (file_checksum, image_id))
+                    conn2.commit()
+                    conn2.close()
                     stats['new_images'] += 1
+                    new_in_dir += 1
                     if progress_callback:
                         progress_callback(f"Added: {relative_path}")
                     if DEBUG:
-                        print(f"[SCAN] Added: {relative_path}")
+                        print(f"[SCAN]   Added ({new_in_dir}/{len(image_files_in_dir)}): {filename}", flush=True)
                 else:
                     stats['existing_images'] += 1
                     if DEBUG:
-                        print(f"[SCAN] Duplicate (not added): {relative_path}")
+                        print(f"[SCAN] Duplicate (not added): {relative_path}", flush=True)
             except Exception as e:
                 error_msg = f"Error processing {relative_path}: {str(e)}"
                 stats['errors'].append(error_msg)
                 if progress_callback:
                     progress_callback(error_msg)
                 if DEBUG:
-                    print(f"[SCAN] ERROR: {error_msg}")
-    
+                    print(f"[SCAN] ERROR: {error_msg}", flush=True)
+
+        if DEBUG and new_in_dir > 0:
+            print(f"[SCAN] Folder done: {new_in_dir} new, {existing_in_dir} already existed", flush=True)
+        elif DEBUG and stats['scanned_folders'] % 50 == 0:
+            print(f"[SCAN] Progress: {stats['scanned_folders']} folders scanned, "
+                  f"{stats['new_images']} new images so far...", flush=True)
+
+    # Save updated folder mtimes
+    if updated_mtimes:
+        save_folder_mtimes(updated_mtimes)
+
     stats['end_time'] = datetime.now()
     stats['duration'] = (stats['end_time'] - stats['start_time']).total_seconds()
     
+    if DEBUG or (stats['skipped_folders'] > 0):
+        print(f"[SCAN] Incremental scan: {stats['scanned_folders']} folders scanned, "
+              f"{stats['skipped_folders']} unchanged folders skipped, "
+              f"{stats['duration']:.2f}s")
+
     return stats
 
 

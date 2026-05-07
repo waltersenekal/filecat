@@ -195,6 +195,12 @@ function addTagToSearch(tag) {
 }
 
 async function loadImages() {
+    // If we're in search mode, re-execute the search to preserve results
+    if (isSearchMode) {
+        await searchImages();
+        return;
+    }
+
     const perPage = document.getElementById('perPage').value;
     const sortBy = document.getElementById('sortBy').value;
     const filterTagged = document.getElementById('filterTagged').value;
