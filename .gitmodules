@@ -1,0 +1,4 @@
+[submodule "stag"]
+	path = stag
+	url = https://github.com/xinyu1205/recognize-anything.git
+	branch = main
