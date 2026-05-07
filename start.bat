@@ -2,8 +2,8 @@
 REM FileCat - Start the application and open in browser
 
 cd /d "%~dp0"
-set VENV_DIR=%~dp0.venv
-set PYTHON=%VENV_DIR%\Scripts\python.exe
+set "VENV_DIR=%USERPROFILE%\.venvs\filecat"
+set "PYTHON=%VENV_DIR%\Scripts\python.exe"
 
 REM Verify venv exists
 if not exist "%PYTHON%" (
@@ -22,7 +22,25 @@ if not exist "data\filecat.db" (
     "%PYTHON%" init_db.py
 )
 
-echo Starting FileCat on http://localhost:5000
-start "" http://localhost:5000
+set "PORT=5000"
+set "PID_LIST="
+for /f "tokens=5" %%p in ('netstat -ano ^| findstr ":%PORT%" ^| findstr "LISTENING"') do (
+    set "PID_LIST=%%p"
+    call :KILLPID %%p
+)
+if not defined PID_LIST (
+    echo Port %PORT% is free.
+)
+
+echo Starting FileCat on http://localhost:%PORT%
+start "" http://localhost:%PORT%
 
 "%PYTHON%" -u app.py
+
+exit /b
+
+:KILLPID
+    echo Port %PORT% is in use by process %1
+    echo Stopping process %1 using port %PORT%...
+    taskkill /PID %1 /F >nul 2>&1
+    goto :eof

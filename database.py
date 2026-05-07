@@ -25,6 +25,27 @@ from datetime import datetime
 from config import DATABASE_PATH
 
 
+def normalize_db_filepath(filepath):
+    """
+    Normalize relative paths to a canonical DB format that always uses backslashes.
+    """
+    if filepath is None:
+        return None
+    normalized = filepath.replace('/', '\\')
+    while '\\\\' in normalized:
+        normalized = normalized.replace('\\\\', '\\')
+    return normalized.strip()
+
+
+def db_filepath_to_os_path(filepath):
+    """
+    Convert DB filepath format to the current OS separator for filesystem access.
+    """
+    if filepath is None:
+        return None
+    return filepath.replace('\\', os.sep).replace('/', os.sep)
+
+
 def get_db_connection():
     """Create and return a database connection"""
     os.makedirs(os.path.dirname(DATABASE_PATH), exist_ok=True)
@@ -120,6 +141,25 @@ def init_database():
         )
     ''')
 
+    # Normalize any legacy filepath separators (e.g. old Linux "/" entries)
+    cursor.execute('SELECT id, filepath FROM images')
+    for row in cursor.fetchall():
+        normalized = normalize_db_filepath(row['filepath'])
+        if normalized != row['filepath']:
+            cursor.execute('UPDATE images SET filepath = ? WHERE id = ?', (normalized, row['id']))
+
+    # Normalize folder_mtimes keys so incremental scanning works cross-platform
+    cursor.execute('SELECT folder_path, last_mtime FROM folder_mtimes')
+    folder_rows = cursor.fetchall()
+    for row in folder_rows:
+        normalized_folder = normalize_db_filepath(row['folder_path'])
+        if normalized_folder != row['folder_path']:
+            cursor.execute('DELETE FROM folder_mtimes WHERE folder_path = ?', (row['folder_path'],))
+            cursor.execute(
+                'INSERT OR REPLACE INTO folder_mtimes (folder_path, last_mtime) VALUES (?, ?)',
+                (normalized_folder, row['last_mtime'])
+            )
+
     conn.commit()
     conn.close()
     print("Database initialized successfully!")
@@ -128,6 +168,7 @@ def init_database():
 # Image operations
 def add_image(filepath, filename, file_size, date_modified, thumbnail_path=None):
     """Add a new image to the database"""
+    filepath = normalize_db_filepath(filepath)
     conn = get_db_connection()
     cursor = conn.cursor()
     try:
@@ -777,10 +818,16 @@ def get_untagged_images_for_ai(limit=None):
     cursor = conn.cursor()
 
     query = '''
-        SELECT * FROM images
-        WHERE is_tagged = 0
-        AND (integrity_status IS NULL OR integrity_status IN ('unchecked', 'valid'))
-        ORDER BY date_added DESC
+        SELECT i.* FROM images i
+        WHERE i.is_tagged = 0
+        AND (i.integrity_status IS NULL OR i.integrity_status IN ('unchecked', 'valid'))
+        AND NOT EXISTS (
+            SELECT 1 FROM ai_suggestions ai
+            WHERE ai.image_id = i.id
+            AND ai.status = 'processed'
+            AND ai.tag_name = '__NO_SUGGESTIONS__'
+        )
+        ORDER BY i.date_added DESC
     '''
 
     if limit:

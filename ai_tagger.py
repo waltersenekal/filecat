@@ -25,12 +25,73 @@ STAG_PATH = os.environ.get('STAG_PATH', os.path.join(os.path.dirname(__file__), 
 if STAG_PATH not in sys.path:
     sys.path.insert(0, STAG_PATH)
 
-# Import STAG components
+# Pre-import compatibility patches for transformers
+# These functions were removed in transformers >= 5.0 but STAG's bert.py still imports them
 try:
     import torch
+    import transformers.modeling_utils as tmu
+    
+    # Patch apply_chunking_to_forward if missing
+    if not hasattr(tmu, 'apply_chunking_to_forward'):
+        def apply_chunking_to_forward(forward_fn, chunk_size, chunk_dim, *input_tensors):
+            """Compatibility shim for transformers >= 5.0"""
+            if chunk_size > 0:
+                tensor_shape = input_tensors[0].shape[chunk_dim]
+                if tensor_shape % chunk_size != 0:
+                    raise ValueError(f"dimension {chunk_dim} must be divisible by chunk_size {chunk_size}")
+                num_chunks = tensor_shape // chunk_size
+                input_tensors_chunks = tuple(t.chunk(num_chunks, dim=chunk_dim) for t in input_tensors)
+                output_chunks = tuple(forward_fn(*chunks) for chunks in zip(*input_tensors_chunks))
+                return torch.cat(output_chunks, dim=chunk_dim)
+            return forward_fn(*input_tensors)
+        
+        tmu.apply_chunking_to_forward = apply_chunking_to_forward
+    
+    # Patch find_pruneable_heads_and_indices if missing
+    if not hasattr(tmu, 'find_pruneable_heads_and_indices'):
+        def find_pruneable_heads_and_indices(heads, n_heads, head_size, already_pruned_heads):
+            """Compatibility shim for transformers >= 5.0"""
+            mask = torch.ones(n_heads, head_size)
+            heads = set(heads) - already_pruned_heads
+            for head in heads:
+                head = head - sum(1 if h < head else 0 for h in already_pruned_heads)
+                mask[head] = 0
+            mask = mask.view(-1).contiguous().eq(1)
+            index = torch.arange(len(mask))[mask].long()
+            return heads, index
+        
+        tmu.find_pruneable_heads_and_indices = find_pruneable_heads_and_indices
+    
+    # Patch prune_linear_layer if missing
+    if not hasattr(tmu, 'prune_linear_layer'):
+        def prune_linear_layer(layer, index):
+            """Compatibility shim for transformers >= 5.0"""
+            index = index.to(layer.weight.device)
+            layer.weight = torch.nn.Parameter(layer.weight[index])
+            if layer.bias is not None:
+                layer.bias = torch.nn.Parameter(layer.bias[index])
+            return layer
+        
+        tmu.prune_linear_layer = prune_linear_layer
+except Exception as e:
+    print(f"[AI Tagger] Warning during pre-import patches: {e}")
+
+# Import STAG components
+try:
     from ram import get_transform, inference_ram as inference
     from ram.models import ram_plus
+    from ram.models.bert import BertPreTrainedModel
     from huggingface_hub import hf_hub_download
+    
+    # Monkey-patch BertPreTrainedModel for transformers >= 5.0 compatibility
+    # Add all_tied_weights_keys property if missing (required by newer transformers)
+    if not hasattr(BertPreTrainedModel, 'all_tied_weights_keys'):
+        @property
+        def all_tied_weights_keys(self):
+            """Compatibility shim for transformers >= 5.0"""
+            return getattr(self, '_tied_weights_keys', [])
+        BertPreTrainedModel.all_tied_weights_keys = all_tied_weights_keys
+    
     STAG_AVAILABLE = True
 except ImportError as e:
     print(f"[AI Tagger] Warning: STAG dependencies not available: {e}")

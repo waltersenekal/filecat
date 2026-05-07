@@ -7,7 +7,20 @@ import os
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # Source folder containing images (configurable path)
-SOURCE_FOLDER = os.environ.get('FILECAT_SOURCE_FOLDER', r'D:\Clipart and Digital Paper')
+# Check environment override first, then common default locations.
+source_folder_env = os.environ.get('FILECAT_SOURCE_FOLDER')
+source_folder_relative = os.path.abspath(os.path.join(BASE_DIR, '..', 'Clipart and Digital Paper'))
+source_folder_windows = r'D:\Clipart and Digital Paper'
+
+if source_folder_env:
+    source_folder_env = os.path.expanduser(source_folder_env)
+    if not os.path.isabs(source_folder_env):
+        source_folder_env = os.path.abspath(os.path.join(BASE_DIR, source_folder_env))
+    SOURCE_FOLDER = source_folder_env
+elif os.path.isdir(source_folder_relative):
+    SOURCE_FOLDER = source_folder_relative
+else:
+    SOURCE_FOLDER = source_folder_windows
 
 # Thumbnail storage
 THUMBNAIL_FOLDER = os.path.join(BASE_DIR, 'thumbnails')

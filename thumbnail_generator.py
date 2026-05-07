@@ -5,6 +5,7 @@ Creates optimized thumbnails for faster loading
 import os
 from PIL import Image
 from config import SOURCE_FOLDER, THUMBNAIL_FOLDER, THUMBNAIL_MAX_SIZE, THUMBNAIL_QUALITY
+from database import db_filepath_to_os_path
 
 
 def generate_thumbnail(source_path, relative_path):
@@ -20,7 +21,7 @@ def generate_thumbnail(source_path, relative_path):
     """
     try:
         # Create thumbnail folder structure matching source (relative to THUMBNAIL_FOLDER)
-        thumbnail_rel_path = relative_path  # e.g. '2025/Anguscolorcraft/Quirky Zombie Girl/1.jpg'
+        thumbnail_rel_path = db_filepath_to_os_path(relative_path)
         thumbnail_full_path = os.path.join(THUMBNAIL_FOLDER, thumbnail_rel_path)
         # Create thumbnail directory if needed
         os.makedirs(os.path.dirname(thumbnail_full_path), exist_ok=True)
@@ -39,7 +40,7 @@ def generate_thumbnail(source_path, relative_path):
             thumbnail_path = os.path.splitext(thumbnail_full_path)[0] + '.jpg'
             img.save(thumbnail_path, 'JPEG', quality=THUMBNAIL_QUALITY, optimize=True)
         # Return relative path from thumbnails folder (not prefixed with 'thumbnails/')
-        return os.path.splitext(thumbnail_rel_path)[0] + '.jpg'
+        return (os.path.splitext(thumbnail_rel_path)[0] + '.jpg').replace('\\', '/')
     except Exception as e:
         print(f"Error generating thumbnail for {relative_path}: {e}")
         return None
@@ -58,7 +59,7 @@ def regenerate_all_thumbnails(progress_callback=None):
     success_count = 0
     
     for idx, row in enumerate(images):
-        source_path = os.path.join(SOURCE_FOLDER, row['filepath'])
+        source_path = os.path.join(SOURCE_FOLDER, db_filepath_to_os_path(row['filepath']))
         
         if not os.path.exists(source_path):
             if progress_callback:

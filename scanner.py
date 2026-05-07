@@ -9,7 +9,14 @@ import sys
 import hashlib
 from datetime import datetime
 from config import SOURCE_FOLDER, SUPPORTED_EXTENSIONS, THUMBNAIL_FOLDER
-from database import add_image, get_db_connection, get_all_folder_mtimes, save_folder_mtimes
+from database import (
+    add_image,
+    get_db_connection,
+    get_all_folder_mtimes,
+    save_folder_mtimes,
+    normalize_db_filepath,
+    db_filepath_to_os_path,
+)
 from thumbnail_generator import generate_thumbnail
 
 
@@ -60,7 +67,7 @@ def scan_folder(progress_callback=None, full_scan=False):
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute('SELECT filepath FROM images')
-    existing_paths = {row['filepath'] for row in cursor.fetchall()}
+    existing_paths = {normalize_db_filepath(row['filepath']) for row in cursor.fetchall()}
     conn.close()
     
     # Load cached folder mtimes for incremental scanning
@@ -72,7 +79,7 @@ def scan_folder(progress_callback=None, full_scan=False):
         dirs.sort()
 
         # Check if this directory has changed since last scan
-        rel_dir = os.path.relpath(root, SOURCE_FOLDER)
+        rel_dir = normalize_db_filepath(os.path.relpath(root, SOURCE_FOLDER))
         try:
             current_mtime = os.stat(root).st_mtime
         except OSError:
@@ -100,7 +107,7 @@ def scan_folder(progress_callback=None, full_scan=False):
             stats['total_files_found'] += 1
             full_path = os.path.join(root, filename)
             # Create relative path from SOURCE_FOLDER
-            relative_path = os.path.relpath(full_path, SOURCE_FOLDER)
+            relative_path = normalize_db_filepath(os.path.relpath(full_path, SOURCE_FOLDER))
             # Skip if already in database
             if relative_path in existing_paths:
                 stats['existing_images'] += 1
@@ -182,7 +189,7 @@ def check_missing_files():
     cursor.execute('SELECT id, filepath FROM images')
     
     for row in cursor.fetchall():
-        full_path = os.path.join(SOURCE_FOLDER, row['filepath'])
+        full_path = os.path.join(SOURCE_FOLDER, db_filepath_to_os_path(row['filepath']))
         if not os.path.exists(full_path):
             missing_files.append({
                 'id': row['id'],

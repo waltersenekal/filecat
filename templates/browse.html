@@ -215,7 +215,7 @@ function displayImages(images) {
     imageGrid.innerHTML = images.map((img, idx) => `
         <div class="image-item">
             <div class="image-wrapper" onclick="openLightbox(${idx})">
-                <img src="/thumbnails/${img.thumbnail_path}"
+                <img src="/thumbnails/${encodeURIComponent((img.thumbnail_path || '').replace(/\\/g, '/'))}"
                      alt="${img.filename}"
                      loading="lazy"
                      onerror="this.onerror=null; this.src='data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 width=%22200%22 height=%22200%22><rect width=%22200%22 height=%22200%22 fill=%22%23f3f4f6%22/><text x=%2250%%22 y=%2250%%22 text-anchor=%22middle%22 dy=%22.3em%22 font-family=%22sans-serif%22 font-size=%2214%22 fill=%22%23999%22>Missing</text></svg>'; this.style.border='2px dashed #dc2626';">
@@ -264,7 +264,7 @@ function changeThumbnailSize() {
 function openLightbox(index) {
     currentLightboxIndex = index;
     const image = currentImages[index];
-    document.getElementById('lightboxImage').src = `/images/${image.filepath}`;
+    document.getElementById('lightboxImage').src = `/images/${encodeURIComponent((image.filepath || '').replace(/\\/g, '/'))}`;
 
     // Show image info
     const infoHtml = `
@@ -290,7 +290,7 @@ function navigateLightbox(direction) {
     if (currentLightboxIndex >= currentImages.length) currentLightboxIndex = 0;
 
     const image = currentImages[currentLightboxIndex];
-    document.getElementById('lightboxImage').src = `/images/${image.filepath}`;
+    document.getElementById('lightboxImage').src = `/images/${encodeURIComponent((image.filepath || '').replace(/\\/g, '/'))}`;
 
     // Update image info
     const infoHtml = `

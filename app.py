@@ -128,7 +128,7 @@ def auto_tag_background_task():
                         image_id = img['id']  # Set this first, before try block
 
                         try:
-                            image_path = os.path.join(SOURCE_FOLDER, img['filepath'])
+                            image_path = os.path.join(SOURCE_FOLDER, db_filepath_to_os_path(img['filepath']))
 
                             if not os.path.exists(image_path):
                                 print(f"[AUTO-TAG]   ⚠️ Skipping missing file: {img['filename']}")
@@ -325,7 +325,14 @@ def serve_thumbnail(filename):
 @app.route('/images/<path:filename>')
 def serve_image(filename):
     """Serve original source images"""
-    return send_from_directory(SOURCE_FOLDER, filename)
+    normalized = db_filepath_to_os_path(filename)
+    normalized = os.path.normpath(normalized)
+    source_abs = os.path.abspath(SOURCE_FOLDER)
+    file_abs = os.path.abspath(os.path.join(source_abs, normalized))
+    if os.path.commonpath([source_abs, file_abs]) != source_abs:
+        return jsonify({'error': 'Invalid path'}), 403
+    rel_to_source = os.path.relpath(file_abs, source_abs)
+    return send_from_directory(SOURCE_FOLDER, rel_to_source)
 
 
 @app.route('/settings')
@@ -652,7 +659,7 @@ def api_browse():
                     _, ext = os.path.splitext(item)
                     if ext.lower() in SUPPORTED_EXTENSIONS:
                         # Get relative path for database lookup
-                        rel_file_path = os.path.relpath(item_path, SOURCE_FOLDER)
+                        rel_file_path = normalize_db_filepath(os.path.relpath(item_path, SOURCE_FOLDER))
 
                         # Look up in database to get tags and ID
                         from database import get_db_connection
@@ -705,7 +712,7 @@ def api_analyze_single_image(image_id):
         print(f"[API DEBUG] Image path: {image['filepath']}")
 
         # Get full image path
-        image_path = os.path.join(SOURCE_FOLDER, image['filepath'])
+        image_path = os.path.join(SOURCE_FOLDER, db_filepath_to_os_path(image['filepath']))
         print(f"[API DEBUG] Full path: {image_path}")
 
         if not os.path.exists(image_path):
@@ -821,7 +828,7 @@ def api_analyze_batch():
                 print(f"[BATCH DEBUG] Processing: {image['filename']}")
 
                 # Get full path
-                image_path = os.path.join(SOURCE_FOLDER, image['filepath'])
+                image_path = os.path.join(SOURCE_FOLDER, db_filepath_to_os_path(image['filepath']))
 
                 if not os.path.exists(image_path):
                     print(f"[BATCH DEBUG] ⚠️ File not found on disk, skipping")
@@ -1037,7 +1044,7 @@ def api_trigger_auto_tag():
                     for idx, img in enumerate(images_to_process):
                         try:
                             image_id = img['id']
-                            image_path = os.path.join(SOURCE_FOLDER, img['filepath'])
+                            image_path = os.path.join(SOURCE_FOLDER, db_filepath_to_os_path(img['filepath']))
 
                             if not os.path.exists(image_path):
                                 continue
@@ -1294,7 +1301,7 @@ def api_compute_checksums():
         errors = 0
 
         for row in images:
-            full_path = os.path.join(SOURCE_FOLDER, row['filepath'])
+            full_path = os.path.join(SOURCE_FOLDER, db_filepath_to_os_path(row['filepath']))
             if os.path.exists(full_path):
                 try:
                     h = hashlib.md5()
@@ -1352,7 +1359,7 @@ def api_regenerate_thumbnails():
                 failed_count = 0
 
                 for idx, row in enumerate(images):
-                    source_path = os.path.join(SOURCE_FOLDER, row['filepath'])
+                    source_path = os.path.join(SOURCE_FOLDER, db_filepath_to_os_path(row['filepath']))
 
                     if not os.path.exists(source_path):
                         failed_count += 1

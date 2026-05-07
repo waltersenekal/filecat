@@ -10,7 +10,7 @@ from config import SOURCE_FOLDER, SUPPORTED_EXTENSIONS
 from database import (
     get_db_connection, delete_image, get_all_images,
     add_image, get_image_by_id, update_image_integrity,
-    get_images_with_integrity_issues
+    get_images_with_integrity_issues, normalize_db_filepath, db_filepath_to_os_path
 )
 from thumbnail_generator import generate_thumbnail
 
@@ -118,7 +118,7 @@ def scan_database_integrity(progress_callback=None, mark_in_db=True):
         filepath = row['filepath']
         filename = row['filename']
 
-        full_path = os.path.join(SOURCE_FOLDER, filepath)
+        full_path = os.path.join(SOURCE_FOLDER, db_filepath_to_os_path(filepath))
 
         if progress_callback:
             progress_callback(idx + 1, total, f"Checking: {filename}")
@@ -178,7 +178,7 @@ def cleanup_missing_files():
         image_id = row['id']
         filepath = row['filepath']
         filename = row['filename']
-        full_path = os.path.join(SOURCE_FOLDER, filepath)
+        full_path = os.path.join(SOURCE_FOLDER, db_filepath_to_os_path(filepath))
 
         if not os.path.exists(full_path):
             delete_image(image_id)
@@ -217,7 +217,7 @@ def handle_corrupted_file(image_id, action='skip', quarantine_folder=None):
         return result
 
     filepath = image['filepath']
-    full_path = os.path.join(SOURCE_FOLDER, filepath)
+    full_path = os.path.join(SOURCE_FOLDER, db_filepath_to_os_path(filepath))
 
     if action == 'skip':
         result['success'] = True
@@ -244,12 +244,12 @@ def handle_corrupted_file(image_id, action='skip', quarantine_folder=None):
             os.makedirs(quarantine_folder, exist_ok=True)
 
             # Create subdirectory structure in quarantine
-            rel_dir = os.path.dirname(filepath)
+            rel_dir = os.path.dirname(db_filepath_to_os_path(filepath))
             quarantine_subdir = os.path.join(quarantine_folder, rel_dir)
             os.makedirs(quarantine_subdir, exist_ok=True)
 
             # Move file
-            dest_path = os.path.join(quarantine_folder, filepath)
+            dest_path = os.path.join(quarantine_folder, db_filepath_to_os_path(filepath))
             if os.path.exists(full_path):
                 shutil.move(full_path, dest_path)
 
@@ -287,7 +287,7 @@ def scan_for_new_files(progress_callback=None):
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute('SELECT filepath FROM images')
-    existing_paths = {row['filepath'] for row in cursor.fetchall()}
+    existing_paths = {normalize_db_filepath(row['filepath']) for row in cursor.fetchall()}
     conn.close()
 
     # Scan filesystem
@@ -299,7 +299,7 @@ def scan_for_new_files(progress_callback=None):
                 continue
 
             full_path = os.path.join(root, filename)
-            relative_path = os.path.relpath(full_path, SOURCE_FOLDER)
+            relative_path = normalize_db_filepath(os.path.relpath(full_path, SOURCE_FOLDER))
 
             # Check if already in database
             if relative_path in existing_paths:
@@ -343,7 +343,8 @@ def add_new_file(filepath, auto_generate_thumbnail=True):
         'message': ''
     }
 
-    full_path = os.path.join(SOURCE_FOLDER, filepath)
+    filepath = normalize_db_filepath(filepath)
+    full_path = os.path.join(SOURCE_FOLDER, db_filepath_to_os_path(filepath))
 
     # Check if file exists
     if not os.path.exists(full_path):
